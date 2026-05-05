@@ -1,0 +1,6 @@
+{
+  "name": "SplatStudio Workspace",
+  "description": "Gaussian Splatting & COLMAP pipeline web dashboard",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
