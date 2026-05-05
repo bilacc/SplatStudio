@@ -14,7 +14,7 @@ const navItems = [
 ] as const;
 
 export function Sidebar() {
-  const { currentView, setCurrentView } = useAppStore();
+  const { currentView, setCurrentView, hardwareBackend } = useAppStore();
 
   return (
     <div className="w-[240px] bg-[#1A1D23] rounded-2xl border border-white/5 flex flex-col h-full select-none shadow-lg transition-all overflow-hidden shrink-0">
@@ -44,12 +44,14 @@ export function Sidebar() {
       </div>
       
       <div className="p-4 border-t border-white/5 shrink-0">
-         <div className="flex items-center justify-center gap-2 px-3 py-1.5 bg-green-500/10 text-green-400 rounded-full border border-green-500/20 text-[10px] font-bold uppercase tracking-wider mx-auto w-fit mb-3">
-          <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-          CUDA Active
+         <div className={cn("flex items-center justify-center gap-2 px-3 py-1.5 rounded-full border text-[10px] font-bold uppercase tracking-wider mx-auto w-fit mb-3 max-w-full truncate", 
+           hardwareBackend === 'CPU' ? "bg-yellow-500/10 text-yellow-500 border-yellow-500/20" : "bg-green-500/10 text-green-400 border-green-500/20"
+         )}>
+          <div className={cn("w-2 h-2 rounded-full min-w-[8px]", hardwareBackend === 'CPU' ? "bg-yellow-500" : "bg-green-400 animate-pulse")}></div>
+          <span className="truncate">{hardwareBackend === 'CPU' ? 'CPU Mode' : hardwareBackend + ' Active'}</span>
         </div>
         <div className="text-[10px] text-center text-gray-600">
-          Powered by NeRF Studio
+          Powered by Express & NeRF Studio
         </div>
       </div>
     </div>

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { MainLayout } from './components/layout/MainLayout';
 import { useAppStore } from './store';
 
@@ -16,7 +16,16 @@ import { SettingsView } from './components/views/SettingsView';
 import { DocsView } from './components/views/DocsView';
 
 export default function App() {
-  const { currentView } = useAppStore();
+  const { currentView, isProcessing, pollStatus } = useAppStore();
+
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
+    if (isProcessing) {
+      pollStatus(); // Initial poll
+      interval = setInterval(pollStatus, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isProcessing, pollStatus]);
 
   const renderView = () => {
     switch (currentView) {

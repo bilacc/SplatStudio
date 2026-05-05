@@ -2,8 +2,8 @@ import { create } from 'zustand';
 
 export type ViewType = 'data' | 'processing' | 'viewer' | 'export' | 'batch' | 'settings' | 'docs';
 
-interface LogEntry {
-  id: string;
+export interface LogEntry {
+  id?: string;
   timestamp: number;
   message: string;
   type: 'info' | 'warn' | 'error' | 'success';
@@ -20,17 +20,21 @@ interface AppState {
   clearFiles: () => void;
   
   // Processing
-  hardwareBackend: 'CUDA' | 'AMD' | 'CPU';
-  setHardwareBackend: (backend: 'CUDA' | 'AMD' | 'CPU') => void;
+  hardwareBackend: string;
+  setHardwareBackend: (backend: string) => void;
+  customGPUs: { id: string; name: string; details: string; type: string }[];
+  addCustomGPU: (gpu: { id: string; name: string; details: string; type: string }) => void;
+  
   isProcessing: boolean;
   progress: number;
-  startProcessing: () => void;
-  stopProcessing: () => void;
+  startProcessing: () => Promise<void>;
+  stopProcessing: () => Promise<void>;
   
   // Terminal Logs
   logs: LogEntry[];
-  addLog: (message: string, type?: LogEntry['type']) => void;
   clearLogs: () => void;
+
+  pollStatus: () => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -45,44 +49,84 @@ export const useAppStore = create<AppState>((set, get) => ({
   hardwareBackend: 'CUDA',
   setHardwareBackend: (hardwareBackend) => set({ hardwareBackend }),
   
+  customGPUs: [],
+  addCustomGPU: (gpu) => set((state) => ({ customGPUs: [...state.customGPUs, gpu] })),
+
   isProcessing: false,
   progress: 0,
-  
-  startProcessing: () => {
-    set({ isProcessing: true, progress: 0 });
-    get().addLog('Starting Gaussian Splat reconstruction pipeline...', 'info');
-    get().addLog(`Initialized using ${get().hardwareBackend} backend runner.`, 'info');
-    
-    // Simulate processing
-    let currentProgress = 0;
-    const interval = setInterval(() => {
-      currentProgress += Math.random() * 5;
-      if (currentProgress < 20) {
-        get().addLog(`Extracting features (COLMAP) - ${currentProgress.toFixed(1)}%`, 'info');
-      } else if (currentProgress < 50) {
-        get().addLog(`Matching features - ${currentProgress.toFixed(1)}%`, 'info');
-      } else if (currentProgress < 80) {
-        get().addLog(`Training NeRF / Gaussian Splatter - Step ${Math.floor(currentProgress * 300)}/30000`, 'info');
-      } else if (currentProgress >= 100) {
-        clearInterval(interval);
-        set({ isProcessing: false, progress: 100 });
-        get().addLog('Processing complete. View the result in the 3D Viewer.', 'success');
-        get().setCurrentView('viewer');
-      } else {
-        set({ progress: Math.min(currentProgress, 100) });
-      }
-    }, 800);
-  },
-  stopProcessing: () => {
-    set({ isProcessing: false, progress: 0 });
-    get().addLog('Processing aborted by user.', 'warn');
-  },
-  
   logs: [
     { id: 'start', timestamp: Date.now(), message: 'SplatStudio initializing...', type: 'info' }
   ],
-  addLog: (message, type = 'info') => set((state) => ({
-    logs: [...state.logs, { id: Math.random().toString(36).substr(2, 9), timestamp: Date.now(), message, type }]
-  })),
+  
+  startProcessing: async () => {
+    try {
+      const formData = new FormData();
+      get().files.forEach(file => {
+        formData.append('files', file);
+      });
+      
+      // Upload files first if not empty
+      if (get().files.length > 0) {
+        await fetch('/api/upload', {
+          method: 'POST',
+          body: formData
+        });
+      }
+
+      await fetch('/api/pipeline/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          backend: get().hardwareBackend,
+          filesCount: get().files.length
+        })
+      });
+      set({ isProcessing: true, progress: 0 });
+    } catch (err) {
+      console.error(err);
+    }
+  },
+
+  stopProcessing: async () => {
+    try {
+      await fetch('/api/pipeline/abort', { method: 'POST' });
+      set({ isProcessing: false });
+    } catch (err) {
+      console.error(err);
+    }
+  },
+
   clearLogs: () => set({ logs: [] }),
+
+  pollStatus: async () => {
+    // We poll the backend to get current state and logs.
+    try {
+      const res = await fetch('/api/pipeline/status');
+      const data = await res.json();
+      
+      const newLogs = data.logs.map((l: any, i: number) => ({ ...l, id: `${l.timestamp}-${i}` }));
+      
+      set((state) => {
+        // Only update logs if length differs to keep it simple, or merge if needed. 
+        // For simulation, we'll just concat the new logs that haven't been added if we tracked index, 
+        // but simpler: replace logs completely from the server to maintain exact state, except initial boot messages.
+        // Actually it's easier to just append new logs based on length:
+        const mergedLogs = [...state.logs.filter(l => l.id === 'start')]; // Keep start log
+        mergedLogs.push(...newLogs);
+        
+        // Auto-navigate to viewer on completion
+        if (state.isProcessing && data.progress >= 100 && !data.isRunning) {
+          setTimeout(() => get().setCurrentView('viewer'), 1500);
+        }
+
+        return {
+          isProcessing: data.isRunning,
+          progress: data.progress,
+          logs: mergedLogs
+        };
+      });
+    } catch (err) {
+      // Failed to poll
+    }
+  }
 }));
