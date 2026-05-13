@@ -123,9 +123,39 @@ export function ProcessingView() {
         </div>
 
         {/* Advanced Parameters */}
-        <div className="lg:col-span-12 xl:col-span-6 bg-[#1A1D23] rounded-2xl p-5 border border-white/5">
-          <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-4">Advanced Parameters</h3>
-          <div className="space-y-4">
+        <div className="lg:col-span-12 xl:col-span-6 bg-[#1A1D23] rounded-2xl p-5 border border-white/5 flex flex-col">
+          <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-4">Pipeline Configuration</h3>
+          <div className="space-y-4 flex-1">
+            <div className="flex gap-3">
+              <div className="flex-1 space-y-1">
+                <label className="text-[10px] text-gray-500">Training Engine</label>
+                <select 
+                  disabled={isProcessing} 
+                  value={useAppStore(s => s.engine)}
+                  onChange={(e) => useAppStore.getState().setEngine(e.target.value)}
+                  className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-blue-400 font-medium focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                >
+                  <option value="nerfstudio">NeRF Studio (Default)</option>
+                  <option value="opensplat">OpenSplat (C++)</option>
+                  <option value="gaustudio">GauStudio</option>
+                </select>
+              </div>
+              <div className="flex-1 space-y-1">
+                <label className="text-[10px] text-gray-500">Video Extraction (FPS)</label>
+                <div className="flex bg-black/30 border border-white/5 rounded-lg overflow-hidden">
+                  <input 
+                    type="number" 
+                    min={1} max={30}
+                    disabled={isProcessing} 
+                    value={useAppStore(s => s.extractFps)}
+                    onChange={(e) => useAppStore.getState().setExtractFps(Number(e.target.value))}
+                    className="w-full bg-transparent p-3 text-xs text-gray-300 focus:outline-none focus:bg-black/50 disabled:opacity-50" 
+                  />
+                  <span className="flex items-center px-3 text-xs text-gray-600 bg-black/50 border-l border-white/5">fps</span>
+                </div>
+              </div>
+            </div>
+
             <div className="space-y-1">
               <label className="text-[10px] text-gray-500">Feature Extraction Quality</label>
               <select disabled={isProcessing} className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50">

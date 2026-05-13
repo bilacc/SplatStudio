@@ -19,6 +19,12 @@ interface AppState {
   removeFile: (index: number) => void;
   clearFiles: () => void;
   
+  // Pipeline settings
+  engine: string;
+  setEngine: (engine: string) => void;
+  extractFps: number;
+  setExtractFps: (fps: number) => void;
+
   // Processing
   hardwareBackend: string;
   setHardwareBackend: (backend: string) => void;
@@ -49,6 +55,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   hardwareBackend: 'CUDA',
   setHardwareBackend: (hardwareBackend) => set({ hardwareBackend }),
   
+  engine: 'nerfstudio',
+  setEngine: (engine) => set({ engine }),
+  
+  extractFps: 2,
+  setExtractFps: (extractFps) => set({ extractFps }),
+
   customGPUs: [],
   addCustomGPU: (gpu) => set((state) => ({ customGPUs: [...state.customGPUs, gpu] })),
 
@@ -78,7 +90,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           backend: get().hardwareBackend,
-          filesCount: get().files.length
+          filesCount: get().files.length,
+          engine: get().engine,
+          extractFps: get().extractFps
         })
       });
       set({ isProcessing: true, progress: 0 });

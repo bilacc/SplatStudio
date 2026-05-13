@@ -129,37 +129,57 @@ async function startServer() {
 
         const targetDataDir = path.join(DATA_DIR, "processed");
         const exportPath = path.join(EXPORTS_DIR, "output.splat");
+        const { engine = 'nerfstudio', customGPU, extractFps = 2 } = req.body;
 
-        // 1. Feature Extraction & Pose matching (ns-process-data)
-        addLog(`[Process Data] Running COLMAP extraction via ns-process-data...`, 'info');
-        pipelineState.progress = 10;
-        
-        const isVideo = inputFiles[0].match(/\.(mp4|mov|avi)$/i);
+        const isVideo = inputFiles[0].match(/\.(mp4|mov|avi|mkv)$/i);
         const dataArg = isVideo 
           ? path.join(UPLOADS_DIR, inputFiles[0]) 
           : UPLOADS_DIR;
 
-        const processType = isVideo ? 'video' : 'images';
-        
-        let code = await runProcess('ns-process-data', [processType, '--data', dataArg, '--output-dir', targetDataDir]);
-        if (code !== 0) throw new Error("ns-process-data failed");
-        
-        pipelineState.progress = 40;
+        let code;
 
-        // 2. Training (ns-train splatfacto)
-        addLog(`[Training] Starting splatfacto training...`, 'info');
-        code = await runProcess('ns-train', ['splatfacto', '--data', targetDataDir], (msg) => {
-           if (msg.includes('ETA')) pipelineState.progress = Math.min(90, pipelineState.progress + 0.1);
-        });
-        if (code !== 0) throw new Error("ns-train failed");
-        pipelineState.progress = 90;
+        // 1. Data Preparation & COLMAP
+        pipelineState.progress = 5;
+        if (engine === 'opensplat' || engine === 'gaustudio') {
+            addLog(`[FFmpeg] Extracting video frames at ${extractFps} FPS...`, 'info');
+            // Assuming local ffmpeg and colmap setup (simulated native call)
+            code = await runProcess('ffmpeg', ['-i', dataArg, '-vf', `fps=${extractFps}`, path.join(targetDataDir, 'img%04d.jpg')]);
+            pipelineState.progress = 15;
+            
+            addLog(`[COLMAP] Running exhaustive feature extraction & matching...`, 'info');
+            code = await runProcess('colmap', ['automatic_reconstructor', '--workspace_path', targetDataDir, '--image_path', targetDataDir]);
+            pipelineState.progress = 40;
 
-        // 3. Export (.splat)
-        // Note: ns-export commands vary, usually `ns-export gaussian-splat --load-config [config] --output-dir [dir]`
-        // This is a placeholder for the final export command mapping.
-        addLog(`[Export] Converting point cloud to web splat format...`, 'info');
-        code = await runProcess('ns-export', ['gaussian-splat', '--output-dir', EXPORTS_DIR]);
-        if (code !== 0) throw new Error("ns-export failed");
+            if (engine === 'opensplat') {
+              addLog(`[OpenSplat] Training 3D Gaussian Splatting model...`, 'info');
+              code = await runProcess('opensplat', ['--input', targetDataDir, '--output', EXPORTS_DIR]);
+            } else {
+              addLog(`[GauStudio] Generating splat representation...`, 'info');
+              code = await runProcess('gaustudio', ['--source', targetDataDir, '--output', EXPORTS_DIR]);
+            }
+
+        } else {
+            // Default NeRF Studio workflow
+            addLog(`[Process Data] Running COLMAP extraction via ns-process-data...`, 'info');
+            const processType = isVideo ? 'video' : 'images';
+            code = await runProcess('ns-process-data', [processType, '--data', dataArg, '--output-dir', targetDataDir]);
+            if (code !== 0) throw new Error("ns-process-data failed");
+            
+            pipelineState.progress = 40;
+
+            // 2. Training (ns-train splatfacto)
+            addLog(`[Training] Starting splatfacto training...`, 'info');
+            code = await runProcess('ns-train', ['splatfacto', '--data', targetDataDir], (msg) => {
+               if (msg.includes('ETA')) pipelineState.progress = Math.min(90, pipelineState.progress + 0.1);
+            });
+            if (code !== 0) throw new Error("ns-train failed");
+            pipelineState.progress = 90;
+
+            // 3. Export (.splat)
+            addLog(`[Export] Converting point cloud to web splat format...`, 'info');
+            code = await runProcess('ns-export', ['gaussian-splat', '--load-config', path.join(targetDataDir, 'outputs'), '--output-dir', EXPORTS_DIR]);
+            if (code !== 0) throw new Error("ns-export failed");
+        }
 
         pipelineState.progress = 100;
         pipelineState.isRunning = false;

@@ -46,10 +46,12 @@ export function DocsView() {
           </h3>
           <div className="grid sm:grid-cols-2 gap-3 relative z-10">
             {[
-              { name: "NeRF Studio Docs", url: "https://docs.nerf.studio/quickstart/installation.html" },
+              { name: "NeRF Studio Docs", url: "https://docs.nerf.studio/" },
               { name: "COLMAP Guidelines", url: "https://colmap.github.io/" },
-              { name: "Scaniverse App", url: "https://scaniverse.com/" },
-              { name: "LumaLabs AI", url: "https://lumalabs.ai/" },
+              { name: "PlayCanvas SuperSplat", url: "https://github.com/playcanvas/supersplat" },
+              { name: "OpenSplat (C++)", url: "https://github.com/pierotofy/OpenSplat" },
+              { name: "MrNeRF LichtFeld Studio", url: "https://github.com/MrNeRF/LichtFeld-Studio" },
+              { name: "GauStudio Framework", url: "https://github.com/GAP-LAB-CUHK-SZ/gaustudio" },
             ].map(link => (
               <a key={link.name} href={link.url} target="_blank" rel="noreferrer" className="flex items-center justify-between p-3.5 rounded-xl bg-white/5 border border-transparent hover:border-purple-500/30 transition-all group/link hover:bg-white/10">
                 <span className="text-xs font-medium text-gray-300">{link.name}</span>

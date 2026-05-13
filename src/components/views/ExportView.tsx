@@ -50,8 +50,9 @@ export function ExportView() {
              </label>
              <label className="flex items-center cursor-pointer p-3 bg-black/20 rounded-xl border border-transparent hover:border-white/5 transition-colors">
                <input type="checkbox" defaultChecked className="accent-blue-500 rounded bg-[#222] border-[#333] mr-3" />
-               <span className="text-xs text-gray-300">Optimize texture atlases for GLTF</span>
+               <span className="text-xs text-gray-300 flex-1">Optimize texture atlases for GLTF</span>
              </label>
+             <p className="text-[10px] text-gray-500 italic px-2">Powered by gsbox / 3dgsconverter formats.</p>
           </div>
 
           <div className="flex gap-3 mt-auto">

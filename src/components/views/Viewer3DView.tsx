@@ -1,15 +1,19 @@
-import React, { Suspense, useState, useEffect } from 'react';
+import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Box as BoxMesh, Environment, Grid, Splat } from '@react-three/drei';
+import { OrbitControls, Box as BoxMesh, Environment, Grid, Splat, TransformControls } from '@react-three/drei';
 import { useAppStore } from '../../store';
 import { Box as BoxIcon, AlertTriangle } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import * as THREE from 'three';
 
 export function Viewer3DView() {
   const { progress, logs } = useAppStore();
   const [wireframe, setWireframe] = useState(false);
   const [lighting, setLighting] = useState(true);
   const [splatUrl, setSplatUrl] = useState<string | null>(null);
+  
+  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
+  const targetRef = useRef<THREE.Group>(null);
 
   const hasFinished = progress === 100 && !logs.some(l => l.message.includes('Pipeline Error') && l.timestamp > Date.now() - 30000);
 
@@ -52,6 +56,13 @@ export function Viewer3DView() {
           >
             Lighting
           </button>
+          <div className="w-px h-3 bg-white/10 mx-1"></div>
+          <button 
+            className="px-2 py-0.5 rounded transition-colors text-[11px] font-medium text-purple-400 bg-white/5 hover:bg-white/10"
+            title="Bounding Box Crop"
+          >
+            Crop Box (AABB)
+          </button>
         </div>
       </div>
 
@@ -73,12 +84,22 @@ export function Viewer3DView() {
 
           <Suspense fallback={null}>
             {hasFinished && splatUrl && splatUrl !== 'SIMULATION' ? (
-              <Splat src={splatUrl} position={[0, 0, 0]} rotation={[0, 0, 0]} alphaTest={0.1} />
+              <>
+                <TransformControls object={targetRef} mode={transformMode} size={0.5} />
+                <group ref={targetRef}>
+                  <Splat src={splatUrl} position={[0, 0, 0]} rotation={[0, 0, 0]} alphaTest={0.1} />
+                </group>
+              </>
             ) : hasFinished ? (
-              <mesh>
-                <boxGeometry args={[1, 1, 1]} />
-                <meshStandardMaterial color="#3b82f6" wireframe={wireframe} />
-              </mesh>
+              <>
+                <TransformControls object={targetRef} mode={transformMode} size={0.5} />
+                <group ref={targetRef}>
+                  <mesh>
+                    <boxGeometry args={[1, 1, 1]} />
+                    <meshStandardMaterial color="#3b82f6" wireframe={wireframe} />
+                  </mesh>
+                </group>
+              </>
             ) : (
               <BoxMesh args={[1, 1, 1]}>
                 <meshStandardMaterial color="#333" wireframe={true} opacity={0.2} transparent />
@@ -103,9 +124,24 @@ export function Viewer3DView() {
 
         {hasFinished && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex bg-black/40 backdrop-blur-xl p-1 rounded-full border border-white/10 z-20 shadow-lg shadow-black/20">
-            <button className="px-5 py-2 hover:bg-white/10 rounded-full text-xs text-gray-300 transition-colors">Translate</button>
-            <button className="px-5 py-2 bg-blue-600 rounded-full text-xs text-white font-medium shadow-md shadow-blue-900/30 transition-colors">Rotate</button>
-            <button className="px-5 py-2 hover:bg-white/10 rounded-full text-xs text-gray-300 transition-colors">Scale</button>
+            <button 
+              onClick={() => setTransformMode('translate')}
+              className={cn("px-5 py-2 rounded-full text-xs transition-colors", transformMode === 'translate' ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/30" : "hover:bg-white/10 text-gray-300")}
+            >
+              Translate
+            </button>
+            <button 
+               onClick={() => setTransformMode('rotate')}
+               className={cn("px-5 py-2 rounded-full text-xs transition-colors", transformMode === 'rotate' ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/30" : "hover:bg-white/10 text-gray-300")}
+            >
+              Rotate
+            </button>
+            <button 
+               onClick={() => setTransformMode('scale')}
+               className={cn("px-5 py-2 rounded-full text-xs transition-colors", transformMode === 'scale' ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/30" : "hover:bg-white/10 text-gray-300")}
+            >
+              Scale
+            </button>
           </div>
         )}
       </div>
