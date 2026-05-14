@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppStore } from '../../store';
 import { HardDrive, Play, Square, Plus } from 'lucide-react';
 import { cn } from '../../lib/utils';
@@ -10,10 +10,19 @@ export function ProcessingView() {
   const [showAddGPU, setShowAddGPU] = useState(false);
   const [newGPUName, setNewGPUName] = useState('');
   const [newGPUDevice, setNewGPUDevice] = useState('CUDA');
+  const [gpuInfo, setGpuInfo] = useState<{available?: boolean, name?: string, vram_gb?: number, cuda_version?: string} | null>(null);
+
+  useEffect(() => {
+    fetch('/api/gpu-info').then(r => r.json()).then(setGpuInfo).catch(() => {});
+  }, []);
+
+  const detectedName = gpuInfo?.name || 'Auto-detect NVIDIA GPU';
+  const detectedDetails = gpuInfo?.available 
+    ? `CUDA ${gpuInfo.cuda_version} | VRAM: ${gpuInfo.vram_gb}GB` 
+    : 'CUDA | Detected at pipeline start';
 
   const defaultBackends = [
-    { id: 'CUDA', name: 'NVIDIA RTX 4090', details: 'CUDA Arch 8.9 | VRAM: 24GB', type: 'CUDA' },
-    { id: 'AMD', name: 'AMD Radeon VII', details: 'ROCm Fallback | VRAM: 16GB', type: 'AMD' }
+    { id: 'CUDA', name: detectedName, details: detectedDetails, type: 'CUDA' }
   ];
 
   const allBackends = [...defaultBackends, ...customGPUs];
@@ -134,10 +143,8 @@ export function ProcessingView() {
                   onChange={(e) => useAppStore.getState().setEngine(e.target.value)}
                   className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-blue-400 font-medium focus:outline-none focus:border-blue-500 disabled:opacity-50"
                 >
-                  <option value="nerfstudio">NeRF Studio (Default)</option>
-                  <option value="opensplat">OpenSplat (C++)</option>
-                  <option value="gaustudio">GauStudio</option>
-                  <option value="pointrix">Pointrix</option>
+                  <option value="gsplat">gsplat (Bundled GPU Engine)</option>
+                  <option value="nerfstudio">NeRF Studio (External)</option>
                 </select>
               </div>
               <div className="flex-1 space-y-1">

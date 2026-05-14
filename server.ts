@@ -85,6 +85,24 @@ async function startServer() {
     res.json({ success: true, files: req.files?.length || 0 });
   });
 
+  // GPU detection endpoint
+  app.get("/api/gpu-info", async (req, res) => {
+    try {
+      const binDir = process.env.BIN_DIR || path.join(process.cwd(), 'bin');
+      const pythonExe = path.join(binDir, 'python', 'python.exe');
+      const result = await new Promise<string>((resolve) => {
+        const proc = spawn(pythonExe, ['-c', 
+          'import torch,json;g=torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None;print(json.dumps({"available":torch.cuda.is_available(),"name":g.name if g else None,"vram_gb":round(g.total_mem/1073741824,1) if g else 0,"cuda_version":torch.version.cuda or "N/A"}))'
+        ], { shell: true });
+        let out = '';
+        proc.stdout.on('data', d => out += d.toString());
+        proc.on('close', () => resolve(out.trim()));
+        proc.on('error', () => resolve('{}'));
+      });
+      res.json(JSON.parse(result || '{}'));
+    } catch { res.json({ available: false }); }
+  });
+
   app.post("/api/pipeline/start", (req, res) => {
     if (pipelineState.isRunning) {
       return res.status(400).json({ error: "Pipeline already running" });
