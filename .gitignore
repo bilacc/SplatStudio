@@ -6,3 +6,19 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Bundled binaries (too large for git)
+bin/ffmpeg.exe
+bin/colmap.exe
+bin/lib/
+bin/python/
+
+# Runtime data
+data/
+uploads/
+exports/
+*.zip
+
+# Electron build output
+release/
+out/

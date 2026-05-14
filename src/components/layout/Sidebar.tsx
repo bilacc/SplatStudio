@@ -44,11 +44,9 @@ export function Sidebar() {
       </div>
       
       <div className="p-4 border-t border-white/5 shrink-0">
-         <div className={cn("flex items-center justify-center gap-2 px-3 py-1.5 rounded-full border text-[10px] font-bold uppercase tracking-wider mx-auto w-fit mb-3 max-w-full truncate", 
-           hardwareBackend === 'CPU' ? "bg-yellow-500/10 text-yellow-500 border-yellow-500/20" : "bg-green-500/10 text-green-400 border-green-500/20"
-         )}>
-          <div className={cn("w-2 h-2 rounded-full min-w-[8px]", hardwareBackend === 'CPU' ? "bg-yellow-500" : "bg-green-400 animate-pulse")}></div>
-          <span className="truncate">{hardwareBackend === 'CPU' ? 'CPU Mode' : hardwareBackend + ' Active'}</span>
+         <div className={cn("flex items-center justify-center gap-2 px-3 py-1.5 rounded-full border text-[10px] font-bold uppercase tracking-wider mx-auto w-fit mb-3 max-w-full truncate bg-green-500/10 text-green-400 border-green-500/20")}>
+          <div className="w-2 h-2 rounded-full min-w-[8px] bg-green-400 animate-pulse"></div>
+          <span className="truncate">{hardwareBackend} Active</span>
         </div>
         <div className="text-[10px] text-center text-gray-600">
           Powered by Express & NeRF Studio

@@ -45,24 +45,36 @@ async function startServer() {
     pipelineState.logs.push({ timestamp: Date.now(), message, type });
   };
 
-  // Helper function to run real shell commands if CLI tools exist
+  // Helper function to run real shell commands with bundled DLL paths
   const runProcess = (command: string, args: string[], onProgress?: (msg: string) => void): Promise<number> => {
     return new Promise((resolve) => {
-      const proc = spawn(command, args, { shell: true });
+      const binDir = process.env.BIN_DIR || path.join(process.cwd(), 'bin');
+      const libDir = path.join(binDir, 'lib');
+      const envPath = `${binDir};${libDir};${process.env.PATH || ''}`;
+      
+      const proc = spawn(command, args, { 
+        shell: true,
+        env: { ...process.env, PATH: envPath }
+      });
       proc.stdout.on('data', (data) => {
         const msg = data.toString().trim();
         if (msg) {
-          addLog(`[${command}] ${msg}`, 'info');
+          const label = path.basename(command).replace('.exe','').replace('.py','');
+          addLog(`[${label}] ${msg}`, 'info');
           if (onProgress) onProgress(msg);
         }
       });
       proc.stderr.on('data', (data) => {
         const msg = data.toString().trim();
-        if (msg) addLog(`[${command} ERROR] ${msg}`, 'warn');
+        if (msg) {
+          const label = path.basename(command).replace('.exe','').replace('.py','');
+          addLog(`[${label}] ${msg}`, 'warn');
+          if (onProgress) onProgress(msg);
+        }
       });
       proc.on('close', (code) => resolve(code || 0));
       proc.on('error', (err) => {
-        addLog(`[${command} FAILED] ${err.message}`, 'error');
+        addLog(`[${path.basename(command)} FAILED] ${err.message}`, 'error');
         resolve(-1);
       });
     });
@@ -77,113 +89,135 @@ async function startServer() {
     if (pipelineState.isRunning) {
       return res.status(400).json({ error: "Pipeline already running" });
     }
-    const { backend, filesCount } = req.body;
     
     pipelineState.isRunning = true;
     pipelineState.progress = 0;
     pipelineState.logs = [];
     
     addLog('Starting Gaussian Splat reconstruction pipeline...', 'info');
-    
-    // Check if NeRF Studio is natively accessible
-    const isNsInstalled = fs.existsSync('/usr/local/bin/ns-train') || fs.existsSync('/opt/conda/bin/ns-train') || process.env.LOCAL_RUN === 'true';
 
-    if (!isNsInstalled && !process.env.TEST_LOCAL) {
-      addLog(`[System Warning] Native NeRF Studio/COLMAP binaries not detected in environment.`, 'warn');
-      addLog(`[System] Initializing simulation mode for visualizer UI workflow tests.`, 'info');
-      
-      // Simulate progress
-      const simulateProcessing = () => {
-        if (!pipelineState.isRunning) return; 
-
-        pipelineState.progress += Math.random() * 8;
-        
-        if (pipelineState.progress < 20) {
-          addLog(`[COLMAP] Extracting features... ${pipelineState.progress.toFixed(1)}%`, 'info');
-        } else if (pipelineState.progress < 50) {
-          addLog(`[COLMAP] Exhaustive feature matching... ${pipelineState.progress.toFixed(1)}%`, 'info');
-        } else if (pipelineState.progress < 80) {
-          addLog(`[NeRFStudio] Training splatfacto model - Iteration ${Math.floor(pipelineState.progress * 300)}/30000`, 'info');
-        }
-
-        if (pipelineState.progress >= 100) {
-          pipelineState.progress = 100;
-          pipelineState.isRunning = false;
-          addLog('[NeRFStudio] Checkpoint saved successfully.', 'success');
-          addLog('Processing complete. Assets ready for Export/Visualization.', 'success');
-        } else {
-          setTimeout(simulateProcessing, 500);
-        }
-      };
-      setTimeout(simulateProcessing, 1000);
-      return res.json({ success: true, mode: 'simulation' });
-    }
-
-    // REAL PIPELINE EXECUTION FOR LOCAL MACHINES
-    addLog(`Spawning native bindings for ${backend}...`, 'info');
-    
+    // REAL PIPELINE EXECUTION USING BUNDLED BINARIES
     (async () => {
       try {
-        const inputFiles = fs.readdirSync(UPLOADS_DIR);
+        const inputFiles = fs.readdirSync(UPLOADS_DIR).filter(f => !f.startsWith('.'));
         if (inputFiles.length === 0) throw new Error("No files uploaded");
 
         const targetDataDir = path.join(DATA_DIR, "processed");
-        const exportPath = path.join(EXPORTS_DIR, "output.splat");
-        const { engine = 'nerfstudio', customGPU, extractFps = 2 } = req.body;
+        const imagesDir = path.join(targetDataDir, "images");
+        const sparseDir = path.join(targetDataDir, "sparse");
+        
+        // Create working directories
+        [targetDataDir, imagesDir, sparseDir].forEach(d => {
+          if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+        });
+        
+        const { extractFps = 2 } = req.body;
 
         const isVideo = inputFiles[0].match(/\.(mp4|mov|avi|mkv)$/i);
         const dataArg = isVideo 
           ? path.join(UPLOADS_DIR, inputFiles[0]) 
           : UPLOADS_DIR;
 
+        // Use BIN_DIR from env, fallback to current dir/bin
+        const binDir = process.env.BIN_DIR || path.join(process.cwd(), 'bin');
+        const getBin = (name: string) => path.join(binDir, name);
+
         let code;
 
-        // 1. Data Preparation & COLMAP
-        pipelineState.progress = 5;
-        if (engine === 'opensplat' || engine === 'gaustudio') {
-            addLog(`[FFmpeg] Extracting video frames at ${extractFps} FPS...`, 'info');
-            // Assuming local ffmpeg and colmap setup (simulated native call)
-            code = await runProcess('ffmpeg', ['-i', dataArg, '-vf', `fps=${extractFps}`, path.join(targetDataDir, 'img%04d.jpg')]);
-            pipelineState.progress = 15;
-            
-            addLog(`[COLMAP] Running exhaustive feature extraction & matching...`, 'info');
-            code = await runProcess('colmap', ['automatic_reconstructor', '--workspace_path', targetDataDir, '--image_path', targetDataDir]);
-            pipelineState.progress = 40;
-
-            if (engine === 'opensplat') {
-              addLog(`[OpenSplat] Training 3D Gaussian Splatting model...`, 'info');
-              code = await runProcess('opensplat', ['--input', targetDataDir, '--output', EXPORTS_DIR]);
-            } else {
-              addLog(`[GauStudio] Generating splat representation...`, 'info');
-              code = await runProcess('gaustudio', ['--source', targetDataDir, '--output', EXPORTS_DIR]);
-            }
-
+        // ── Step 1: Extract frames from video ──
+        if (isVideo) {
+          pipelineState.progress = 5;
+          addLog(`[FFmpeg] Extracting video frames at ${extractFps} FPS...`, 'info');
+          code = await runProcess(getBin('ffmpeg.exe'), [
+            '-y', '-i', dataArg, 
+            '-vf', `fps=${extractFps}`, 
+            '-q:v', '2',
+            path.join(imagesDir, 'img%04d.jpg')
+          ]);
+          if (code !== 0) addLog('[FFmpeg] Warning: non-zero exit code', 'warn');
+          pipelineState.progress = 15;
+          addLog(`[FFmpeg] Frame extraction complete.`, 'success');
         } else {
-            // Default NeRF Studio workflow
-            addLog(`[Process Data] Running COLMAP extraction via ns-process-data...`, 'info');
-            const processType = isVideo ? 'video' : 'images';
-            code = await runProcess('ns-process-data', [processType, '--data', dataArg, '--output-dir', targetDataDir]);
-            if (code !== 0) throw new Error("ns-process-data failed");
-            
-            pipelineState.progress = 40;
-
-            // 2. Training (ns-train splatfacto)
-            addLog(`[Training] Starting splatfacto training...`, 'info');
-            code = await runProcess('ns-train', ['splatfacto', '--data', targetDataDir], (msg) => {
-               if (msg.includes('ETA')) pipelineState.progress = Math.min(90, pipelineState.progress + 0.1);
-            });
-            if (code !== 0) throw new Error("ns-train failed");
-            pipelineState.progress = 90;
-
-            // 3. Export (.splat)
-            addLog(`[Export] Converting point cloud to web splat format...`, 'info');
-            code = await runProcess('ns-export', ['gaussian-splat', '--load-config', path.join(targetDataDir, 'outputs'), '--output-dir', EXPORTS_DIR]);
-            if (code !== 0) throw new Error("ns-export failed");
+          // Copy images directly
+          pipelineState.progress = 5;
+          addLog('[Data] Copying input images...', 'info');
+          for (const f of inputFiles) {
+            fs.copyFileSync(path.join(UPLOADS_DIR, f), path.join(imagesDir, f));
+          }
+          pipelineState.progress = 15;
         }
+
+        // ── Step 2: COLMAP reconstruction ──
+        addLog('[COLMAP] Starting feature extraction...', 'info');
+        const dbPath = path.join(targetDataDir, 'database.db');
+        
+        code = await runProcess(getBin('colmap.exe'), [
+          'feature_extractor',
+          '--database_path', dbPath,
+          '--image_path', imagesDir,
+          '--ImageReader.single_camera', '1',
+          '--SiftExtraction.use_gpu', '1'
+        ]);
+        pipelineState.progress = 22;
+        
+        addLog('[COLMAP] Running exhaustive matching...', 'info');
+        code = await runProcess(getBin('colmap.exe'), [
+          'exhaustive_matcher',
+          '--database_path', dbPath,
+          '--SiftMatching.use_gpu', '1'
+        ]);
+        pipelineState.progress = 32;
+        
+        const sparse0 = path.join(sparseDir, '0');
+        if (!fs.existsSync(sparse0)) fs.mkdirSync(sparse0, { recursive: true });
+        
+        addLog('[COLMAP] Running sparse reconstruction (mapper)...', 'info');
+        code = await runProcess(getBin('colmap.exe'), [
+          'mapper',
+          '--database_path', dbPath,
+          '--image_path', imagesDir,
+          '--output_path', sparseDir
+        ]);
+        if (code !== 0) throw new Error("COLMAP mapper failed - check input images quality");
+        pipelineState.progress = 45;
+        addLog('[COLMAP] Sparse reconstruction complete!', 'success');
+
+        // ── Step 3: Gaussian Splatting Training ──
+        addLog('[GS Training] Starting 3D Gaussian Splatting training on GPU...', 'info');
+        const pythonExe = getBin(path.join('python', 'python.exe'));
+        const trainScript = getBin('train_splat.py');
+        
+        // Monitor training progress via JSON file
+        const progressFile = path.join(EXPORTS_DIR, 'training_progress.json');
+        const progressInterval = setInterval(() => {
+          try {
+            if (fs.existsSync(progressFile)) {
+              const data = JSON.parse(fs.readFileSync(progressFile, 'utf-8'));
+              const trainPct = data.progress_pct || 0;
+              // Map training progress (0-100%) to pipeline progress (45-95%)
+              pipelineState.progress = 45 + (trainPct * 0.5);
+              if (data.loss !== undefined) {
+                addLog(`[GS Training] Iter ${data.iteration}/${data.total} | Loss: ${data.loss.toFixed(5)} | Gaussians: ${data.num_gaussians}`, 'info');
+              }
+            }
+          } catch {}
+        }, 3000);
+        
+        code = await runProcess(pythonExe, [
+          trainScript,
+          '--input', targetDataDir,
+          '--output', EXPORTS_DIR,
+          '--iterations', '7000',
+          '--resolution', '0.5'
+        ]);
+        
+        clearInterval(progressInterval);
+        
+        if (code !== 0) throw new Error("Gaussian Splatting training failed");
 
         pipelineState.progress = 100;
         pipelineState.isRunning = false;
-        addLog('Pipeline completed successfully! Splat exported.', 'success');
+        addLog('Pipeline completed successfully! Splat model exported.', 'success');
 
       } catch (err: any) {
         pipelineState.isRunning = false;

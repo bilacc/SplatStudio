@@ -13,8 +13,7 @@ export function ProcessingView() {
 
   const defaultBackends = [
     { id: 'CUDA', name: 'NVIDIA RTX 4090', details: 'CUDA Arch 8.9 | VRAM: 24GB', type: 'CUDA' },
-    { id: 'AMD', name: 'AMD Radeon VII', details: 'ROCm Fallback | VRAM: 16GB', type: 'AMD' },
-    { id: 'CPU', name: 'CPU Mode', details: 'Universal Fallback', type: 'CPU' }
+    { id: 'AMD', name: 'AMD Radeon VII', details: 'ROCm Fallback | VRAM: 16GB', type: 'AMD' }
   ];
 
   const allBackends = [...defaultBackends, ...customGPUs];
@@ -39,7 +38,7 @@ export function ProcessingView() {
   const isLegacyWarning = () => {
     const selected = allBackends.find(b => b.id === hardwareBackend);
     if (!selected) return false;
-    return selected.details.includes('Legacy Arch') || hardwareBackend === 'CPU' || selected.type !== 'CUDA';
+    return selected.details.includes('Legacy Arch') || selected.type !== 'CUDA';
   }
 
   return (
