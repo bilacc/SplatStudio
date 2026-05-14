@@ -49,7 +49,7 @@ export function Sidebar() {
           <span className="truncate">{hardwareBackend} Active</span>
         </div>
         <div className="text-[10px] text-center text-gray-600">
-          Powered by Express & NeRF Studio
+          Powered by COLMAP & gsplat
         </div>
       </div>
     </div>

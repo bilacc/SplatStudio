@@ -5,12 +5,32 @@ import { cn } from '../../lib/utils';
 import { motion } from 'framer-motion';
 
 export function ProcessingView() {
-  const { hardwareBackend, setHardwareBackend, isProcessing, progress, startProcessing, stopProcessing, files, customGPUs, addCustomGPU } = useAppStore();
+  const {
+    hardwareBackend,
+    setHardwareBackend,
+    isProcessing,
+    progress,
+    startProcessing,
+    stopProcessing,
+    files,
+    localInputs,
+    customGPUs,
+    addCustomGPU,
+    engine,
+    setEngine,
+    extractFps,
+    setExtractFps,
+    maxIterations,
+    setMaxIterations,
+    resolution,
+    setResolution,
+  } = useAppStore();
 
   const [showAddGPU, setShowAddGPU] = useState(false);
   const [newGPUName, setNewGPUName] = useState('');
   const [newGPUDevice, setNewGPUDevice] = useState('CUDA');
   const [gpuInfo, setGpuInfo] = useState<{available?: boolean, name?: string, vram_gb?: number, cuda_version?: string} | null>(null);
+  const inputCount = files.length + localInputs.length;
 
   useEffect(() => {
     fetch('/api/gpu-info').then(r => r.json()).then(setGpuInfo).catch(() => {});
@@ -139,12 +159,11 @@ export function ProcessingView() {
                 <label className="text-[10px] text-gray-500">Training Engine</label>
                 <select 
                   disabled={isProcessing} 
-                  value={useAppStore(s => s.engine)}
-                  onChange={(e) => useAppStore.getState().setEngine(e.target.value)}
+                  value={engine}
+                  onChange={(e) => setEngine(e.target.value)}
                   className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-blue-400 font-medium focus:outline-none focus:border-blue-500 disabled:opacity-50"
                 >
                   <option value="gsplat">gsplat (Bundled GPU Engine)</option>
-                  <option value="nerfstudio">NeRF Studio (External)</option>
                 </select>
               </div>
               <div className="flex-1 space-y-1">
@@ -154,8 +173,8 @@ export function ProcessingView() {
                     type="number" 
                     min={1} max={30}
                     disabled={isProcessing} 
-                    value={useAppStore(s => s.extractFps)}
-                    onChange={(e) => useAppStore.getState().setExtractFps(Number(e.target.value))}
+                    value={extractFps}
+                    onChange={(e) => setExtractFps(Number(e.target.value))}
                     className="w-full bg-transparent p-3 text-xs text-gray-300 focus:outline-none focus:bg-black/50 disabled:opacity-50" 
                   />
                   <span className="flex items-center px-3 text-xs text-gray-600 bg-black/50 border-l border-white/5">fps</span>
@@ -185,14 +204,27 @@ export function ProcessingView() {
             <div className="flex gap-3">
               <div className="flex-1 space-y-1">
                 <label className="text-[10px] text-gray-500">Max Iterations</label>
-                <input type="number" disabled={isProcessing} defaultValue={30000} className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50" />
+                <input
+                  type="number"
+                  min={1}
+                  max={100000}
+                  disabled={isProcessing}
+                  value={maxIterations}
+                  onChange={(e) => setMaxIterations(Number(e.target.value))}
+                  className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                />
               </div>
               <div className="flex-1 space-y-1">
                 <label className="text-[10px] text-gray-500">Resolution Spec</label>
-                <select disabled={isProcessing} className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50">
-                  <option>1.0 (Full)</option>
-                  <option>0.5 (Half)</option>
-                  <option>0.25 (Quarter)</option>
+                <select
+                  disabled={isProcessing}
+                  value={resolution}
+                  onChange={(e) => setResolution(Number(e.target.value))}
+                  className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                >
+                  <option value={1}>1.0 (Full)</option>
+                  <option value={0.5}>0.5 (Half)</option>
+                  <option value={0.25}>0.25 (Quarter)</option>
                 </select>
               </div>
             </div>
@@ -237,10 +269,10 @@ export function ProcessingView() {
             <div className="w-full max-w-sm mx-auto z-10">
               <button 
                 onClick={startProcessing}
-                disabled={files.length === 0}
+                disabled={inputCount === 0}
                 className={cn(
                   "flex items-center justify-center w-full py-4 rounded-xl transition-all text-xs font-medium shadow-lg",
-                  files.length > 0 
+                  inputCount > 0 
                     ? "bg-blue-600 text-white hover:bg-blue-500 shadow-blue-900/30 hover:scale-[1.02]" 
                     : "bg-white/5 text-gray-600 cursor-not-allowed border border-white/5"
                 )}
@@ -248,7 +280,7 @@ export function ProcessingView() {
                 <Play className="w-4 h-4 mr-2 fill-current" />
                 Start Reconstruction Workflow
               </button>
-              {files.length === 0 && (
+              {inputCount === 0 && (
                 <p className="text-[10px] text-red-400/80 mt-4 bg-red-400/10 py-1.5 rounded-lg border border-red-400/20">Requires input data in Workspace.</p>
               )}
             </div>

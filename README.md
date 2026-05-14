@@ -1,20 +1,41 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# SplatStudio
 
-# Run and deploy your AI Studio app
+Local desktop Gaussian Splatting workspace for Windows.
 
-This contains everything you need to run your app locally.
+SplatStudio is designed as a one-click `.exe` app: users should be able to add a video, image sequence, or folder of extracted frames and produce local `.splat` / `.ply` assets without installing Node, Python, FFmpeg, COLMAP, or Python packages separately.
 
-View your app in AI Studio: https://ai.studio/apps/a947a18e-19ec-41d5-9912-691a2188976d
+## Development
 
-## Run Locally
+Prerequisites for development only:
 
-**Prerequisites:**  Node.js
+- Node.js
+- npm
 
+```powershell
+npm install
+npm run dev
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Desktop development:
+
+```powershell
+npm run electron:dev
+```
+
+Build the Windows installer:
+
+```powershell
+npm run build:exe
+```
+
+## Bundled Runtime
+
+The packaged app includes the `bin` directory as Electron extra resources:
+
+- `ffmpeg.exe`
+- `colmap.exe` and required DLLs
+- embedded Python
+- PyTorch CUDA runtime
+- OpenCV, `plyfile`, `gsplat`, and trainer scripts
+
+Runtime projects, uploads, jobs, and exports are stored in the app workspace directory, not beside the installed executable.

@@ -32,6 +32,16 @@ except ImportError:
 import cv2
 
 
+def gsplat_cuda_available():
+    """Return True only when gsplat's native CUDA extension is loaded."""
+    try:
+        from gsplat.cuda._backend import _C
+        return _C is not None
+    except Exception as exc:
+        print(f"[WARN] Could not inspect gsplat CUDA backend: {exc}")
+        return False
+
+
 def read_colmap_cameras(cameras_path):
     """Read COLMAP cameras.bin or cameras.txt"""
     cameras = {}
@@ -133,6 +143,37 @@ def read_colmap_points3d(points3d_path):
     return points
 
 
+def find_colmap_model(input_root):
+    """Find the most complete COLMAP sparse model under an input workspace."""
+    input_root = Path(input_root)
+    sparse_root = input_root / 'sparse'
+    candidates = []
+
+    if sparse_root.exists():
+        candidates.append(sparse_root)
+        for child in sparse_root.iterdir():
+            if child.is_dir():
+                candidates.append(child)
+    else:
+        candidates.append(input_root)
+
+    valid = []
+    for candidate in candidates:
+        for ext in ['.bin', '.txt']:
+            cameras_path = candidate / f'cameras{ext}'
+            images_path = candidate / f'images{ext}'
+            points3d_path = candidate / f'points3D{ext}'
+            if cameras_path.exists() and images_path.exists() and points3d_path.exists():
+                valid.append((points3d_path.stat().st_size, candidate, cameras_path, images_path, points3d_path))
+                break
+
+    if not valid:
+        return None
+
+    valid.sort(key=lambda item: item[0], reverse=True)
+    return valid[0][1:]
+
+
 def qvec_to_rotmat(qvec):
     """Convert quaternion to rotation matrix"""
     w, x, y, z = qvec
@@ -203,6 +244,57 @@ def save_ply(path, means, scales, quats, opacities, sh_coeffs):
     PlyData([el]).write(path)
 
 
+def save_outputs(output_dir, means, scales, quats, opacities, sh_coeffs):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with torch.no_grad():
+        quats_norm = quats / (torch.norm(quats, dim=-1, keepdim=True) + 1e-10)
+
+        ply_path = output_dir / 'splat.ply'
+        save_ply(str(ply_path), means, scales, quats_norm, opacities, sh_coeffs)
+        print(f"[SplatStudio] Saved PLY to {ply_path}")
+
+        splat_path = output_dir / 'output.splat'
+        save_splat_binary(
+            str(splat_path),
+            means.detach().cpu(),
+            scales.detach().cpu(),
+            quats_norm.detach().cpu(),
+            opacities.detach().cpu(),
+            sh_coeffs.detach().cpu(),
+        )
+        print(f"[SplatStudio] Saved .splat to {splat_path}")
+
+
+def write_progress(output_dir, payload):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / 'training_progress.json', 'w') as f:
+        json.dump(payload, f)
+
+
+def finish_with_draft(args, reason, means, scales, quats, opacities, sh_coeffs):
+    print(f"[WARN] {reason}")
+    if not args.allow_draft_output:
+        print("[ERROR] Native gsplat training is unavailable and draft output is disabled.")
+        sys.exit(2)
+
+    print("[SplatStudio] Exporting COLMAP-initialized draft splat.")
+    save_outputs(args.output, means, scales, quats, opacities, sh_coeffs)
+    write_progress(args.output, {
+        'iteration': 0,
+        'total': args.iterations,
+        'loss': None,
+        'num_gaussians': means.shape[0],
+        'progress_pct': 100.0,
+        'complete': True,
+        'draft': True,
+        'reason': reason
+    })
+    print("[SplatStudio] Draft export complete.")
+
+
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[SplatStudio] Using device: {device}")
@@ -210,22 +302,12 @@ def train(args):
         print(f"[SplatStudio] GPU: {torch.cuda.get_device_name(0)}")
         print(f"[SplatStudio] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
-    # Find COLMAP data
-    sparse_dir = Path(args.input) / 'sparse' / '0'
-    if not sparse_dir.exists():
-        sparse_dir = Path(args.input) / 'sparse'
-    
-    # Try binary first, then text
-    for ext in ['.bin', '.txt']:
-        cameras_path = sparse_dir / f'cameras{ext}'
-        images_path = sparse_dir / f'images{ext}'
-        points3d_path = sparse_dir / f'points3D{ext}'
-        if cameras_path.exists():
-            break
-    
-    if not cameras_path.exists():
-        print(f"[ERROR] COLMAP data not found in {sparse_dir}")
+    model = find_colmap_model(args.input)
+    if model is None:
+        print(f"[ERROR] COLMAP data not found in {Path(args.input) / 'sparse'}")
         sys.exit(1)
+
+    sparse_dir, cameras_path, images_path, points3d_path = model
     
     print(f"[SplatStudio] Reading COLMAP data from {sparse_dir}...")
     cameras = read_colmap_cameras(cameras_path)
@@ -253,11 +335,35 @@ def train(args):
     # Trainable parameters
     means = torch.tensor(pts, device=device, requires_grad=True)
     
-    # Initialize scales based on nearest neighbor distances
-    dists = torch.cdist(means.detach().unsqueeze(0), means.detach().unsqueeze(0)).squeeze(0)
-    dists[dists == 0] = 1e10
-    nn_dists = dists.min(dim=1).values
-    avg_dist = nn_dists.mean().item()
+    # Initialize scales based on nearest neighbor distances (memory-efficient)
+    print(f"[SplatStudio] Computing initial scales (memory-efficient)...")
+    with torch.no_grad():
+        if n_points > 20000:
+            # For large point clouds, sample to estimate average spacing
+            sample_size = min(5000, n_points)
+            indices = torch.randperm(n_points, device=device)[:sample_size]
+            sample_pts = means.detach()[indices]
+            
+            # Compute distances in batches
+            batch_size = 512
+            nn_dists_list = []
+            for i in range(0, sample_size, batch_size):
+                batch = sample_pts[i:i+batch_size]
+                dists = torch.cdist(batch.unsqueeze(0), sample_pts.unsqueeze(0)).squeeze(0)
+                dists[dists == 0] = 1e10
+                nn_dists_list.append(dists.min(dim=1).values)
+            nn_dists_sample = torch.cat(nn_dists_list)
+            avg_dist = nn_dists_sample.mean().item()
+            nn_dists = torch.full((n_points,), avg_dist, device=device)
+        else:
+            # Small enough for full distance matrix
+            batch_size = 2048
+            nn_dists = torch.full((n_points,), 1e10, device=device)
+            for i in range(0, n_points, batch_size):
+                end = min(i + batch_size, n_points)
+                dists = torch.cdist(means.detach()[i:end].unsqueeze(0), means.detach().unsqueeze(0)).squeeze(0)
+                dists[:, i:end][torch.arange(end-i, device=device), torch.arange(end-i, device=device)] = 1e10
+                nn_dists[i:end] = dists.min(dim=1).values
     
     scales = torch.log(nn_dists.unsqueeze(-1).repeat(1, 3) * 0.5).requires_grad_(True)
     quats = torch.zeros(n_points, 4, device=device)
@@ -271,6 +377,12 @@ def train(args):
     
     opacities = torch.full((n_points, 1), -2.0, device=device, requires_grad=True)
     
+    native_backend_ready = device.type == 'cuda' and gsplat_cuda_available()
+    if not native_backend_ready:
+        reason = "gsplat CUDA rasterizer is unavailable in the bundled Python runtime."
+        finish_with_draft(args, reason, means, torch.exp(scales), quats, opacities, sh_coeffs)
+        return
+
     # Optimizer
     optimizer = optim.Adam([
         {'params': [means], 'lr': args.lr_position},
@@ -345,6 +457,10 @@ def train(args):
     
     # Training loop
     print(f"[SplatStudio] Starting training for {args.iterations} iterations...")
+    loss = None
+    render_successes = 0
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     for iteration in tqdm(range(args.iterations), desc="Training"):
         optimizer.zero_grad()
@@ -366,7 +482,7 @@ def train(args):
                 quats=quats_norm,
                 scales=torch.exp(scales),
                 opacities=torch.sigmoid(opacities.squeeze(-1)),
-                colors=sh_coeffs[:, 0, :],  # Use DC component directly
+                colors=sh_coeffs,  # [N, 1, 3] SH coefficients
                 viewmats=viewmat.unsqueeze(0),
                 Ks=K.unsqueeze(0),
                 width=W,
@@ -379,6 +495,7 @@ def train(args):
         except Exception as e:
             print(f"\n[WARN] Render error at iter {iteration}: {e}")
             continue
+        render_successes += 1
         
         # L1 + SSIM loss
         loss = torch.nn.functional.l1_loss(rendered, gt_image)
@@ -397,41 +514,27 @@ def train(args):
                 'num_gaussians': means.shape[0],
                 'progress_pct': (iteration / args.iterations) * 100
             }
-            progress_path = Path(args.output) / 'training_progress.json'
-            with open(progress_path, 'w') as f:
-                json.dump(progress, f)
+            write_progress(args.output, progress)
     
+    if loss is None or render_successes == 0:
+        reason = "gsplat rasterization failed for every training iteration."
+        finish_with_draft(args, reason, means, torch.exp(scales), quats, opacities, sh_coeffs)
+        return
+
     # Save outputs
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    with torch.no_grad():
-        # Save PLY
-        ply_path = output_dir / 'splat.ply'
-        save_ply(str(ply_path), means, torch.exp(scales), 
-                 quats / (torch.norm(quats, dim=-1, keepdim=True) + 1e-10),
-                 opacities, sh_coeffs)
-        print(f"[SplatStudio] Saved PLY to {ply_path}")
-        
-        # Save .splat binary format
-        splat_path = output_dir / 'output.splat'
-        save_splat_binary(str(splat_path), 
-                         means.cpu(), torch.exp(scales).cpu(),
-                         (quats / (torch.norm(quats, dim=-1, keepdim=True) + 1e-10)).cpu(),
-                         opacities.cpu(), sh_coeffs.cpu())
-        print(f"[SplatStudio] Saved .splat to {splat_path}")
+    print(f"[SplatStudio] Training finished. Saving model...")
+    save_outputs(output_dir, means, torch.exp(scales), quats, opacities, sh_coeffs)
     
     # Final progress
     progress = {
         'iteration': args.iterations,
         'total': args.iterations,
-        'loss': loss.item(),
+        'loss': loss.item() if loss is not None else 0.0,
         'num_gaussians': means.shape[0],
         'progress_pct': 100.0,
         'complete': True
     }
-    with open(output_dir / 'training_progress.json', 'w') as f:
-        json.dump(progress, f)
+    write_progress(output_dir, progress)
     
     print("[SplatStudio] Training complete!")
 
@@ -447,6 +550,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr-rotation', type=float, default=0.001, help='Learning rate for rotations')
     parser.add_argument('--lr-color', type=float, default=0.0025, help='Learning rate for colors')
     parser.add_argument('--lr-opacity', type=float, default=0.05, help='Learning rate for opacity')
+    parser.add_argument('--allow-draft-output', action='store_true', help='Export COLMAP-initialized splats when native training is unavailable')
     args = parser.parse_args()
     
     train(args)

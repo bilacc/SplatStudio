@@ -5,6 +5,9 @@ import { useAppStore } from '../../store';
 export function ExportView() {
   const { progress } = useAppStore();
   const hasFinished = progress === 100;
+  const downloadSplat = () => {
+    window.location.href = '/api/export/output.splat';
+  };
 
   return (
     <div className="max-w-4xl mx-auto h-full flex flex-col">
@@ -56,7 +59,7 @@ export function ExportView() {
 
           <div className="flex gap-3 mt-auto">
             <button disabled={!hasFinished} className="flex-1 bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-xs font-medium transition-all text-gray-300 hover:text-white disabled:opacity-50">Optimize Mesh</button>
-            <button disabled={!hasFinished} className="flex-1 bg-blue-600 hover:bg-blue-500 py-3 rounded-xl text-xs font-medium shadow-lg shadow-blue-900/30 text-white disabled:opacity-50 flex items-center justify-center gap-1.5 transition-all">
+            <button disabled={!hasFinished} onClick={downloadSplat} className="flex-1 bg-blue-600 hover:bg-blue-500 py-3 rounded-xl text-xs font-medium shadow-lg shadow-blue-900/30 text-white disabled:opacity-50 flex items-center justify-center gap-1.5 transition-all">
               <Download className="w-3.5 h-3.5" />
               Export Now
             </button>

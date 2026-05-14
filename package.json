@@ -1,17 +1,19 @@
 {
-  "name": "react-example",
+  "name": "splatstudio",
   "private": true,
   "version": "0.0.0",
+  "description": "Local desktop Gaussian Splatting workspace for Windows",
+  "author": "SplatStudio",
   "type": "module",
   "main": "main.js",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "node server.js",
     "build": "vite build",
-    "start": "node --experimental-strip-types server.ts",
+    "start": "node server.js",
     "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
     "lint": "tsc --noEmit",
-    "electron:dev": "concurrently \"vite\" \"electron .\"",
+    "electron:dev": "electron .",
     "build:exe": "npm run build && electron-builder --win"
   },
   "build": {
@@ -21,7 +23,8 @@
       "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "target": "dir",
+      "signAndEditExecutable": false
     },
     "extraResources": [
       {
@@ -35,12 +38,12 @@
     "files": [
       "dist/**/*",
       "main.js",
-      "server.ts",
+      "server.js",
+      "preload.cjs",
       "package.json"
     ]
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
     "@tailwindcss/vite": "^4.1.14",

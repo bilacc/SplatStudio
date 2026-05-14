@@ -25,10 +25,10 @@ export function Viewer3DView() {
           if (r.ok) {
             setSplatUrl('/api/output.splat');
           } else {
-            setSplatUrl('SIMULATION');
+            setSplatUrl(null);
           }
         })
-        .catch(() => setSplatUrl('SIMULATION'));
+        .catch(() => setSplatUrl(null));
     }
   }, [hasFinished]);
 
@@ -37,7 +37,7 @@ export function Viewer3DView() {
       {/* Viewport Toolbar */}
       <div className="absolute top-4 left-4 z-10 flex gap-2">
         <div className="bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/10 text-[11px] flex gap-4 shadow-lg shadow-black/20">
-          <span><strong className="text-blue-400 font-medium">SPLAT:</strong> {hasFinished ? (splatUrl === 'SIMULATION' ? 'Simulated' : 'Native') : '0'}</span>
+          <span><strong className="text-blue-400 font-medium">SPLAT:</strong> {hasFinished && splatUrl ? 'Native' : '0'}</span>
           <span><strong className="text-blue-400 font-medium">FPS:</strong> 60.0</span>
         </div>
         <div className="bg-black/60 backdrop-blur-md px-1.5 py-1.5 rounded-lg border border-white/10 flex gap-1 items-center shadow-lg shadow-black/20">
@@ -66,10 +66,10 @@ export function Viewer3DView() {
         </div>
       </div>
 
-      {splatUrl === 'SIMULATION' && hasFinished && (
+      {!splatUrl && hasFinished && (
         <div className="absolute top-4 right-4 z-10 bg-yellow-500/10 backdrop-blur-md px-3 py-2 rounded-lg border border-yellow-500/20 text-[11px] flex items-center text-yellow-500 shadow-lg shadow-black/20 max-w-xs">
           <AlertTriangle className="w-4 h-4 mr-2 shrink-0" />
-          Native NeRF Studio unavailable. Displaying simulation visualizer. Run locally to process actual meshes.
+          No splat file is available for the latest reconstruction.
         </div>
       )}
 
@@ -83,21 +83,11 @@ export function Viewer3DView() {
           <Grid infiniteGrid fadeDistance={20} sectionColor="#666" cellColor="#222" />
 
           <Suspense fallback={null}>
-            {hasFinished && splatUrl && splatUrl !== 'SIMULATION' ? (
+            {hasFinished && splatUrl ? (
               <>
                 <TransformControls object={targetRef} mode={transformMode} size={0.5} />
                 <group ref={targetRef}>
                   <Splat src={splatUrl} position={[0, 0, 0]} rotation={[0, 0, 0]} alphaTest={0.1} />
-                </group>
-              </>
-            ) : hasFinished ? (
-              <>
-                <TransformControls object={targetRef} mode={transformMode} size={0.5} />
-                <group ref={targetRef}>
-                  <mesh>
-                    <boxGeometry args={[1, 1, 1]} />
-                    <meshStandardMaterial color="#3b82f6" wireframe={wireframe} />
-                  </mesh>
                 </group>
               </>
             ) : (
