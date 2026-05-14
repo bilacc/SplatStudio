@@ -28,17 +28,16 @@ export function ExportView() {
                 <option>GLTF Binary (.glb)</option>
                 <option>Wavefront (.obj)</option>
                 <option>Stanford (.ply)</option>
-                <option>Filmbox (.fbx)</option>
-                <option>Stereolithography (.stl)</option>
+                <option>Web Splat (.splat)</option>
+                <option>Kapture Format (Multi-view)</option>
               </select>
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] text-gray-500">Simplification</label>
-              <select className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-blue-400 focus:outline-none focus:border-blue-500 font-medium">
-                <option>100% (Preserve)</option>
-                <option>80% (High Quality)</option>
-                <option>50% (Balanced)</option>
-                <option>20% (Low Poly)</option>
+              <label className="text-[10px] text-gray-500">Compression (GSCodec)</label>
+              <select className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-purple-400 focus:outline-none focus:border-purple-500 font-medium">
+                <option>None (Raw Splat)</option>
+                <option>Light (2x smaller)</option>
+                <option>High (10x+ via GSCodec)</option>
               </select>
             </div>
           </div>

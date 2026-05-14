@@ -138,6 +138,7 @@ export function ProcessingView() {
                   <option value="nerfstudio">NeRF Studio (Default)</option>
                   <option value="opensplat">OpenSplat (C++)</option>
                   <option value="gaustudio">GauStudio</option>
+                  <option value="pointrix">Pointrix</option>
                 </select>
               </div>
               <div className="flex-1 space-y-1">
@@ -156,14 +157,24 @@ export function ProcessingView() {
               </div>
             </div>
 
-            <div className="space-y-1">
-              <label className="text-[10px] text-gray-500">Feature Extraction Quality</label>
-              <select disabled={isProcessing} className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50">
-                <option>High (Default)</option>
-                <option>Medium</option>
-                <option>Low (Faster)</option>
-                <option>Ultra (Highest Precision)</option>
-              </select>
+            <div className="flex gap-3">
+              <div className="flex-1 space-y-1">
+                <label className="text-[10px] text-gray-500">Feature Extraction Quality</label>
+                <select disabled={isProcessing} className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500 disabled:opacity-50">
+                  <option>High (Default)</option>
+                  <option>Medium</option>
+                  <option>Low (Faster)</option>
+                  <option>Ultra (Highest Precision)</option>
+                </select>
+              </div>
+              <div className="flex-1 space-y-1">
+                <label className="text-[10px] text-gray-500">Scene Optimization</label>
+                <select disabled={isProcessing} className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-blue-400 font-medium focus:outline-none focus:border-blue-500 disabled:opacity-50">
+                  <option>Standard / Object</option>
+                  <option>Indoor / Room</option>
+                  <option>Driving / City (DriveStudio)</option>
+                </select>
+              </div>
             </div>
             <div className="flex gap-3">
               <div className="flex-1 space-y-1">
