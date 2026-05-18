@@ -204,17 +204,22 @@ function collectMediaFiles(inputPaths, addLog) {
   return { images, videos };
 }
 
-function copyImagesToWorkspace(imagePaths, imagesDir, addLog) {
+async function copyImagesToWorkspace(imagePaths, imagesDir, addLog) {
   ensureDir(imagesDir);
   let copied = 0;
 
   for (const imagePath of imagePaths) {
     const destination = uniqueDestination(imagesDir, safeBaseName(imagePath));
-    hardlinkOrCopy(imagePath, destination);
+    try {
+      await fs.promises.link(imagePath, destination);
+    } catch {
+      await fs.promises.copyFile(imagePath, destination);
+    }
     copied += 1;
 
     if (copied % 500 === 0) {
       addLog(`[Data] Prepared ${copied}/${imagePaths.length} frames...`, "info");
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
 
@@ -499,9 +504,7 @@ export async function startServer(options = {}) {
               videos[0],
               "-vf",
               `fps=${extractFps}`,
-              "-q:v",
-              "2",
-              path.join(imagesDir, "frame_%06d.jpg"),
+              path.join(imagesDir, "frame_%06d.png"),
             ],
             { label: "FFmpeg" },
           );
@@ -511,7 +514,7 @@ export async function startServer(options = {}) {
         } else {
           pipelineState.progress = 5;
           addLog(`[Data] Preparing ${images.length} image frame${images.length === 1 ? "" : "s"}...`, "info");
-          const copied = copyImagesToWorkspace(images, imagesDir, addLog);
+          const copied = await copyImagesToWorkspace(images, imagesDir, addLog);
           pipelineState.progress = 15;
           addLog(`[Data] Prepared ${copied} image frame${copied === 1 ? "" : "s"}.`, "success");
         }
