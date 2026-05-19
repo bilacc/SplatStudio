@@ -52,6 +52,20 @@ ipcMain.handle('splatstudio:select-inputs', async (_event, mode = 'files') => {
   return result.filePaths.map(toInputItem);
 });
 
+ipcMain.handle('splatstudio:select-splat-file', async (_event) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select a custom Splat or PLY model',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Splat Models (*.splat, *.ply)', extensions: ['splat', 'ply'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
 app.whenReady().then(async () => {
   const binDir = getBinDir();
 
@@ -78,6 +92,7 @@ app.whenReady().then(async () => {
   });
 
   mainWindow.loadURL(localServer.url);
+  mainWindow.webContents.openDevTools();
 });
 
 app.on('window-all-closed', () => {

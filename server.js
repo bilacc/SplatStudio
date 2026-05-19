@@ -699,6 +699,9 @@ export async function startServer(options = {}) {
   });
 
   app.get("/api/output.splat", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
     const candidate = latestExisting([
       path.join(pipelineState.currentOutputDir || "", "output.splat"),
       path.join(exportsRoot, "output.splat"),
@@ -714,6 +717,61 @@ export async function startServer(options = {}) {
     ]);
     if (candidate) return res.sendFile(candidate);
     return res.status(404).json({ error: "PLY model not generated yet." });
+  });
+
+  app.post("/api/custom/import", async (req, res) => {
+    const { filePath } = req.body;
+    if (!filePath || !pathExists(filePath)) {
+      return res.status(400).json({ error: "Invalid file path." });
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const destSplat = path.join(exportsRoot, "custom.splat");
+
+    try {
+      if (ext === ".splat") {
+        fs.copyFileSync(filePath, destSplat);
+        addLog(`[Custom Import] Loaded splat file: ${path.basename(filePath)}`, "success");
+        return res.json({ success: true, url: "/api/custom.splat" });
+      } else if (ext === ".ply") {
+        const destPly = path.join(exportsRoot, "custom.ply");
+        fs.copyFileSync(filePath, destPly);
+        addLog(`[Custom Import] Loaded PLY file: ${path.basename(filePath)}`, "success");
+        return res.json({ success: true, url: "/api/custom.ply" });
+      } else {
+        return res.status(400).json({ error: "Unsupported file extension." });
+      }
+    } catch (err) {
+      addLog(`[Conversion Error] ${err.message}`, "error");
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/custom.ply", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    const candidate = path.join(exportsRoot, "custom.ply");
+    if (pathExists(candidate)) return res.sendFile(candidate);
+    return res.status(404).json({ error: "Custom ply model not found." });
+  });
+
+  app.get("/api/custom.spz", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    const candidate = path.join(exportsRoot, "custom.spz");
+    if (pathExists(candidate)) return res.sendFile(candidate);
+    return res.status(404).json({ error: "Custom spz model not found." });
+  });
+
+  app.get("/api/custom.splat", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    const candidate = path.join(exportsRoot, "custom.splat");
+    if (pathExists(candidate)) return res.sendFile(candidate);
+    return res.status(404).json({ error: "Custom splat model not found." });
   });
 
   app.get("/api/export/:fileName", (req, res) => {

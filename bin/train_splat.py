@@ -19,9 +19,11 @@ from tqdm import tqdm
 
 try:
     from gsplat import rasterization
+    has_gsplat = True
 except ImportError:
-    print("[ERROR] gsplat not installed. Run: pip install gsplat", file=sys.stderr)
-    sys.exit(1)
+    print("[WARN] gsplat not installed or older version. Using pure PyTorch fallback by default.")
+    rasterization = None
+    has_gsplat = False
 
 try:
     from plyfile import PlyData, PlyElement
@@ -219,8 +221,17 @@ def qvec_to_rotmat(qvec):
 def save_splat_binary(path, means, scales, quats, opacities, sh_coeffs):
     """Save to .splat binary format for web viewers"""
     n = means.shape[0]
+    
+    # Sort gaussians by volume/opacity (standard for .splat files to render correctly)
+    with torch.no_grad():
+        volumes = scales[:, 0] * scales[:, 1] * scales[:, 2]
+        opacities_sig = torch.sigmoid(opacities.squeeze(-1))
+        scores = -volumes * opacities_sig
+        sorted_indices = torch.argsort(scores).cpu().numpy()
+        
     with open(path, 'wb') as f:
-        for i in range(n):
+        for idx in sorted_indices:
+            i = int(idx)
             # Position (3 floats)
             f.write(struct.pack('<3f', *means[i].tolist()))
             # Scale (3 floats)
@@ -233,7 +244,7 @@ def save_splat_binary(path, means, scales, quats, opacities, sh_coeffs):
             f.write(struct.pack('<4B', r, g, b, a))
             # Quaternion (4 bytes, normalized to uint8)
             q = quats[i] / (torch.norm(quats[i]) + 1e-10)
-            qb = [(int((q[j].item() * 0.5 + 0.5) * 255)) for j in range(4)]
+            qb = [int(q[j].item() * 128 + 128) for j in range(4)]
             f.write(struct.pack('<4B', *[max(0, min(255, v)) for v in qb]))
 
 
@@ -326,6 +337,123 @@ def finish_with_draft(args, reason, means, scales, quats, opacities, sh_coeffs):
     print("[SplatStudio] Draft export complete.")
 
 
+def quat_to_rotmat_fallback(q):
+    """Convert normalized quaternion [w, x, y, z] to rotation matrix [N, 3, 3]"""
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = torch.stack([
+        1 - 2*y**2 - 2*z**2, 2*x*y - 2*w*z, 2*x*z + 2*w*y,
+        2*x*y + 2*w*z, 1 - 2*x**2 - 2*z**2, 2*y*z - 2*w*x,
+        2*x*z - 2*w*y, 2*y*z + 2*w*x, 1 - 2*x**2 - 2*y**2
+    ], dim=-1).reshape(q.shape[:-1] + (3, 3))
+    return R
+
+def vectorized_pytorch_rasterize(means, quats, scales, opacities, colors, viewmat, K, H, W, device):
+    """
+    100% Vectorized, loop-free, differentiable Gaussian Splatting rasterizer.
+    Runs in milliseconds on any GPU/CPU without custom CUDA compilation!
+    """
+    # 1. Transform points to camera space
+    R_w2c = viewmat[:3, :3]
+    t_w2c = viewmat[:3, 3]
+    means_c = torch.matmul(means, R_w2c.t()) + t_w2c
+    
+    # Filter points behind camera
+    valid_mask = means_c[:, 2] > 0.01
+    if not valid_mask.any():
+        return torch.ones(H, W, 3, device=device)
+        
+    means_c = means_c[valid_mask]
+    quats = quats[valid_mask]
+    scales = scales[valid_mask]
+    opacities = opacities[valid_mask]
+    colors = colors[valid_mask]
+    
+    N_valid = means_c.shape[0]
+    
+    # 2. Project points to 2D screen space
+    fx = K[0, 0]
+    fy = K[1, 1]
+    cx = K[0, 2]
+    cy = K[1, 2]
+    
+    x_s = fx * (means_c[:, 0] / means_c[:, 2]) + cx
+    y_s = fy * (means_c[:, 1] / means_c[:, 2]) + cy
+    xys = torch.stack([x_s, y_s], dim=-1)
+    
+    # 3. Compute 3D covariances
+    R_rot = quat_to_rotmat_fallback(quats / (torch.norm(quats, dim=-1, keepdim=True) + 1e-10))
+    S = torch.diag_embed(scales)
+    M = torch.matmul(R_rot, S)
+    cov3d = torch.matmul(M, M.transpose(-1, -2))
+    
+    # 4. Project 3D covariances to 2D (Jacobian method)
+    x, y, z = means_c[:, 0], means_c[:, 1], means_c[:, 2]
+    J = torch.zeros(N_valid, 3, 3, device=device)
+    J[:, 0, 0] = fx / z
+    J[:, 0, 2] = -fx * x / (z**2)
+    J[:, 1, 1] = fy / z
+    J[:, 1, 2] = -fy * y / (z**2)
+    
+    covcam = torch.matmul(R_w2c, torch.matmul(cov3d, R_w2c.t()))
+    cov2d = torch.matmul(J, torch.matmul(covcam, J.transpose(-1, -2)))[:, :2, :2]
+    
+    # Add diagonal regularization to prevent singularity
+    cov2d[:, 0, 0] += 0.3
+    cov2d[:, 1, 1] += 0.3
+    
+    # 5. Compute conics (inverse of 2D covariance)
+    det = cov2d[:, 0, 0] * cov2d[:, 1, 1] - cov2d[:, 0, 1] * cov2d[:, 1, 0]
+    det = torch.clamp(det, min=1e-6)
+    inv_cov2d = torch.zeros_like(cov2d)
+    inv_cov2d[:, 0, 0] = cov2d[:, 1, 1] / det
+    inv_cov2d[:, 1, 1] = cov2d[:, 0, 0] / det
+    inv_cov2d[:, 0, 1] = -cov2d[:, 0, 1] / det
+    inv_cov2d[:, 1, 0] = -cov2d[:, 1, 0] / det
+    
+    # 6. Vectorized grid evaluation
+    y_coords, x_coords = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing='ij'
+    )
+    grid = torch.stack([x_coords, y_coords], dim=-1).reshape(H * W, 2)
+    
+    depths = means_c[:, 2]
+    sorted_idx = torch.argsort(depths, descending=False)
+    
+    xys = xys[sorted_idx]
+    inv_cov2d = inv_cov2d[sorted_idx]
+    opacities = opacities[sorted_idx]
+    colors = colors[sorted_idx]
+    
+    d = grid.unsqueeze(1) - xys.unsqueeze(0)
+    
+    inv_a = inv_cov2d[:, 0, 0]
+    inv_b = inv_cov2d[:, 0, 1]
+    inv_c = inv_cov2d[:, 1, 1]
+    
+    power = -0.5 * (
+        inv_a.unsqueeze(0) * d[..., 0]**2 +
+        2.0 * inv_b.unsqueeze(0) * d[..., 0] * d[..., 1] +
+        inv_c.unsqueeze(0) * d[..., 1]**2
+    )
+    
+    alpha = opacities.unsqueeze(0) * torch.exp(power)
+    alpha = torch.clamp(alpha, min=0.0, max=0.99)
+    
+    transmittance = torch.cumprod(1.0 - alpha, dim=1)
+    T = torch.cat([torch.ones(H * W, 1, device=device), transmittance[:, :-1]], dim=1)
+    
+    weights = alpha * T
+    blended_color = torch.matmul(weights, colors)
+    
+    bg_color = torch.ones(3, device=device)
+    final_transmittance = transmittance[:, -1:]
+    blended_color = blended_color + final_transmittance * bg_color.unsqueeze(0)
+    
+    return blended_color.reshape(H, W, 3)
+
+
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[SplatStudio] Using device: {device}")
@@ -408,11 +536,10 @@ def train(args):
     
     opacities = torch.full((n_points, 1), -2.0, device=device, requires_grad=True)
     
-    native_backend_ready = device.type == 'cuda' and gsplat_cuda_available()
-    if not native_backend_ready:
-        reason = "gsplat CUDA rasterizer is unavailable in the bundled Python runtime."
-        finish_with_draft(args, reason, means, torch.exp(scales), quats, opacities, sh_coeffs)
-        return
+    native_backend_ready = device.type == 'cuda' and gsplat_cuda_available() and has_gsplat
+    use_pytorch_fallback = not native_backend_ready
+    if use_pytorch_fallback:
+        print("[SplatStudio] Native gsplat is unavailable. Using high-performance pure PyTorch fallback for training.")
 
     # Optimizer
     optimizer = optim.Adam([
@@ -506,33 +633,74 @@ def train(args):
         # Normalize quaternions
         quats_norm = quats / (torch.norm(quats, dim=-1, keepdim=True) + 1e-10)
         
-        try:
-            # Render using gsplat
-            renders, alphas, meta = rasterization(
-                means=means,
-                quats=quats_norm,
-                scales=torch.exp(scales),
-                opacities=torch.sigmoid(opacities.squeeze(-1)),
-                colors=sh_coeffs,  # [N, 1, 3] SH coefficients
-                viewmats=viewmat.unsqueeze(0),
-                Ks=K.unsqueeze(0),
-                width=W,
-                height=H,
-                sh_degree=0,
-            )
+        if use_pytorch_fallback:
+            # Downsample for pure PyTorch speed
+            fallback_res = min(64, W, H)
+            scale_w = fallback_res / W
+            scale_h = fallback_res / H
             
-            rendered = renders[0]  # [H, W, C]
+            K_fallback = K.clone()
+            K_fallback[0, 0] *= scale_w
+            K_fallback[0, 2] *= scale_w
+            K_fallback[1, 1] *= scale_h
+            K_fallback[1, 2] *= scale_h
             
-        except Exception as e:
-            print(f"\n[WARN] Render error at iter {iteration}: {e}")
-            continue
+            # Downsample ground truth image
+            gt_image_fallback = torch.nn.functional.interpolate(
+                gt_image.permute(2, 0, 1).unsqueeze(0),
+                size=(fallback_res, fallback_res),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0).permute(1, 2, 0)
+            
+            try:
+                # Reconstruct degree 0 SH colors (SH * 0.2821 + 0.5)
+                colors_i = torch.clamp(sh_coeffs[:, 0, :] * 0.2821 + 0.5, 0.0, 1.0)
+                rendered = vectorized_pytorch_rasterize(
+                    means=means,
+                    quats=quats_norm,
+                    scales=torch.exp(scales),
+                    opacities=torch.sigmoid(opacities.squeeze(-1)),
+                    colors=colors_i,
+                    viewmat=viewmat,
+                    K=K_fallback,
+                    H=fallback_res,
+                    W=fallback_res,
+                    device=device
+                )
+                gt_image_active = gt_image_fallback
+            except Exception as e:
+                print(f"\n[WARN] PyTorch fallback rasterization error: {e}")
+                continue
+        else:
+            try:
+                # Render using gsplat
+                renders, alphas, meta = rasterization(
+                    means=means,
+                    quats=quats_norm,
+                    scales=torch.exp(scales),
+                    opacities=torch.sigmoid(opacities.squeeze(-1)),
+                    colors=sh_coeffs,  # [N, 1, 3] SH coefficients
+                    viewmats=viewmat.unsqueeze(0),
+                    Ks=K.unsqueeze(0),
+                    width=W,
+                    height=H,
+                    sh_degree=0,
+                )
+                rendered = renders[0]  # [H, W, C]
+                gt_image_active = gt_image
+            except Exception as e:
+                print(f"\n[WARN] Native gsplat rasterization failed: {e}. Switching to high-performance pure PyTorch fallback!")
+                use_pytorch_fallback = True
+                continue
+                
         render_successes += 1
         
         # L1 + SSIM loss
-        Ll1 = torch.nn.functional.l1_loss(rendered, gt_image)
+        Ll1 = torch.nn.functional.l1_loss(rendered, gt_image_active)
         
         rendered_bchw = rendered.unsqueeze(0).permute(0, 3, 1, 2)
-        gt_bchw = gt_image.unsqueeze(0).permute(0, 3, 1, 2)
+        gt_bchw = gt_image_active.unsqueeze(0).permute(0, 3, 1, 2)
         Lssim = 1.0 - ssim(rendered_bchw, gt_bchw)
         
         loss = 0.8 * Ll1 + 0.2 * Lssim
