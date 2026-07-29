@@ -1,100 +1,132 @@
-import React from 'react';
-import { Download, Box, Layers, Settings2 } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Box, CheckCircle2, Download, FileBox, FolderOpen, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../../store';
 
+interface ExportFile {
+  name: string;
+  size: number;
+  modifiedAt: string;
+  downloadUrl: string;
+}
+
+const formatBytes = (bytes: number) => {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 export function ExportView() {
-  const { progress } = useAppStore();
-  const hasFinished = progress === 100;
-  const downloadSplat = () => {
-    window.location.href = '/api/export/output.splat';
+  const { currentJobId, outputKind, progress } = useAppStore();
+  const [files, setFiles] = useState<ExportFile[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refreshExports = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/exports');
+      const data = await response.json();
+      setFiles(Array.isArray(data.files) ? data.files : []);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshExports();
+  }, [currentJobId, progress, refreshExports]);
+
+  const openExportsFolder = async () => {
+    await window.splatStudio?.openExportsFolder?.();
   };
 
   return (
     <div className="max-w-4xl mx-auto h-full flex flex-col">
-      <div className="mb-6 shrink-0">
-        <h1 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">Export Asset</h1>
-        <p className="text-[13px] text-gray-400">Save optimized meshes and splats to your local workstation.</p>
+      <div className="flex items-end justify-between mb-6 shrink-0">
+        <div>
+          <h1 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">Export Assets</h1>
+          <p className="text-[13px] text-gray-400">Download the real files produced by the latest reconstruction.</p>
+        </div>
+        <button
+          onClick={refreshExports}
+          disabled={loading}
+          className="flex items-center gap-2 px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10px] text-gray-300 disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1">
-        {/* Export Configuration - Left */}
-        <div className="bg-[#1A1D23] rounded-2xl p-5 border border-white/5 flex flex-col">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Export Settings</h3>
-            <span className="text-[10px] bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded font-mono">High Fidelity</span>
-          </div>
-          
-          <div className="grid grid-cols-2 gap-3 mb-6">
-            <div className="space-y-1">
-              <label className="text-[10px] text-gray-500">Format</label>
-              <select className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500">
-                <option>GLTF Binary (.glb)</option>
-                <option>Wavefront (.obj)</option>
-                <option>Stanford (.ply)</option>
-                <option>Web Splat (.splat)</option>
-                <option>Kapture Format (Multi-view)</option>
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-gray-500">Compression (GSCodec)</label>
-              <select className="w-full bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-purple-400 focus:outline-none focus:border-purple-500 font-medium">
-                <option>None (Raw Splat)</option>
-                <option>Light (2x smaller)</option>
-                <option>High (10x+ via GSCodec)</option>
-              </select>
-            </div>
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 flex-1">
+        <div className="md:col-span-3 bg-[#1A1D23] rounded-2xl p-5 border border-white/5 flex flex-col">
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Available Files</h3>
+            {outputKind && (
+              <span className={`text-[10px] px-2 py-1 rounded font-mono uppercase ${
+                outputKind === 'draft' ? 'bg-yellow-500/10 text-yellow-500' : 'bg-green-500/10 text-green-400'
+              }`}>
+                {outputKind}
+              </span>
+            )}
           </div>
 
-          <div className="space-y-3 mb-8">
-             <label className="flex items-center cursor-pointer p-3 bg-black/20 rounded-xl border border-transparent hover:border-white/5 transition-colors">
-               <input type="checkbox" defaultChecked className="accent-blue-500 rounded bg-[#222] border-[#333] mr-3" />
-               <span className="text-xs text-gray-300">Preserve UV Borders</span>
-             </label>
-             <label className="flex items-center cursor-pointer p-3 bg-black/20 rounded-xl border border-transparent hover:border-white/5 transition-colors">
-               <input type="checkbox" defaultChecked className="accent-blue-500 rounded bg-[#222] border-[#333] mr-3" />
-               <span className="text-xs text-gray-300 flex-1">Optimize texture atlases for GLTF</span>
-             </label>
-             <p className="text-[10px] text-gray-500 italic px-2">Powered by gsbox / 3dgsconverter formats.</p>
-          </div>
-
-          <div className="flex gap-3 mt-auto">
-            <button disabled={!hasFinished} className="flex-1 bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-xs font-medium transition-all text-gray-300 hover:text-white disabled:opacity-50">Optimize Mesh</button>
-            <button disabled={!hasFinished} onClick={downloadSplat} className="flex-1 bg-blue-600 hover:bg-blue-500 py-3 rounded-xl text-xs font-medium shadow-lg shadow-blue-900/30 text-white disabled:opacity-50 flex items-center justify-center gap-1.5 transition-all">
-              <Download className="w-3.5 h-3.5" />
-              Export Now
-            </button>
-          </div>
+          {files.length > 0 ? (
+            <div className="space-y-3">
+              {files.map((file) => (
+                <div key={file.name} className="flex items-center gap-4 p-4 rounded-xl bg-black/20 border border-white/5">
+                  <div className="w-10 h-10 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center">
+                    <FileBox className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-gray-200 truncate">{file.name}</p>
+                    <p className="text-[10px] text-gray-500 mt-1">
+                      {formatBytes(file.size)} · {new Date(file.modifiedAt).toLocaleString()}
+                    </p>
+                  </div>
+                  <a
+                    href={file.downloadUrl}
+                    download={file.name}
+                    className="flex items-center gap-2 px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-[10px] font-medium text-white"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download
+                  </a>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex-1 min-h-[240px] flex flex-col items-center justify-center text-center border border-dashed border-white/10 rounded-xl bg-black/10">
+              <Box className="w-8 h-8 text-gray-600 mb-3" />
+              <p className="text-xs text-gray-400">No export files are available yet.</p>
+              <p className="text-[10px] text-gray-600 mt-2 max-w-xs">
+                Complete a reconstruction, or inspect a previous job from Batch Jobs.
+              </p>
+            </div>
+          )}
         </div>
 
-        {/* Adjustments - Right */}
-        <div className="bg-[#1A1D23] rounded-2xl p-5 border border-white/5 flex flex-col">
-          <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-6">Transforms & Scale</h3>
-          <div className="space-y-6 flex-1">
-             <div className="space-y-1">
-              <label className="text-[10px] text-gray-500 block">Scale Multiplier</label>
-              <div className="flex gap-2">
-                 <input type="number" defaultValue={1.0} step={0.1} className="flex-1 bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500" />
-                 <select className="w-36 bg-black/30 border border-white/5 rounded-lg p-3 text-xs text-gray-300 focus:outline-none focus:border-blue-500">
-                    <option>Meters</option>
-                    <option>Centimeters</option>
-                    <option>Millimeters</option>
-                  </select>
+        <div className="md:col-span-2 bg-[#1A1D23] rounded-2xl p-5 border border-white/5 flex flex-col">
+          <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-5">Latest Job</h3>
+          <div className="space-y-3">
+            <div className="p-4 bg-black/20 rounded-xl border border-white/5">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider">Job ID</p>
+              <p className="text-xs text-gray-300 font-mono mt-2 break-all">{currentJobId || 'No job selected'}</p>
+            </div>
+            <div className="p-4 bg-black/20 rounded-xl border border-white/5 flex items-center gap-3">
+              <CheckCircle2 className={`w-5 h-5 ${files.length > 0 ? 'text-green-400' : 'text-gray-600'}`} />
+              <div>
+                <p className="text-xs text-gray-300">{files.length > 0 ? 'Ready to export' : 'Awaiting output'}</p>
+                <p className="text-[10px] text-gray-500 mt-1">{files.length} generated file{files.length === 1 ? '' : 's'}</p>
               </div>
             </div>
-            
-            <div className="space-y-2">
-               <div className="flex justify-between items-center bg-black/20 p-4 rounded-xl border border-transparent">
-                 <span className="text-xs text-gray-300">Vertex Colors (PLY/GLB)</span>
-                 <span className="text-[10px] bg-green-500/20 text-green-400 px-2 py-0.5 rounded font-mono">Enabled</span>
-               </div>
-               <div className="flex justify-between items-center bg-black/20 p-4 rounded-xl border border-transparent">
-                 <span className="text-xs text-gray-300">Normal Maps Generation</span>
-                 <span className="text-[10px] bg-gray-500/20 text-gray-400 px-2 py-0.5 rounded font-mono">Disabled</span>
-               </div>
-            </div>
           </div>
-          {!hasFinished && (
-            <p className="text-[10px] text-center text-red-400/80 mt-4 bg-red-400/10 py-2 rounded-lg border border-red-400/20">Reconstruction must be complete before exporting.</p>
+
+          {window.splatStudio?.openExportsFolder && (
+            <button
+              onClick={openExportsFolder}
+              className="mt-auto flex items-center justify-center gap-2 px-4 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-xs text-gray-200"
+            >
+              <FolderOpen className="w-4 h-4" />
+              Open exports folder
+            </button>
           )}
         </div>
       </div>

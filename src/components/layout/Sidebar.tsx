@@ -2,6 +2,7 @@ import React from 'react';
 import { useAppStore } from '../../store';
 import { cn } from '../../lib/utils';
 import { Database, Zap, Box, Download, Settings, FileText, Layers } from 'lucide-react';
+import { APP_VERSION } from '../../version';
 
 const navItems = [
   { id: 'data', label: 'Workspace', icon: Database },
@@ -20,7 +21,7 @@ export function Sidebar() {
     <div className="w-[240px] bg-[#1A1D23] rounded-2xl border border-white/5 flex flex-col h-full select-none shadow-lg transition-all overflow-hidden shrink-0">
       <div className="flex items-center px-5 h-[68px] border-b border-white/5 bg-white/5 shrink-0">
         <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-blue-900/20 mr-3 text-xs shrink-0">GS</div>
-        <span className="text-[17px] font-semibold tracking-tight text-white whitespace-nowrap overflow-hidden text-ellipsis">SplatStudio <span className="text-blue-500 font-normal">v1.2</span></span>
+        <span className="text-[17px] font-semibold tracking-tight text-white whitespace-nowrap overflow-hidden text-ellipsis">SplatStudio <span className="text-blue-500 font-normal">v{APP_VERSION}</span></span>
       </div>
       <div className="flex-1 py-4 overflow-y-auto px-3">
         <div className="px-3 text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3 mt-1">Pipeline</div>

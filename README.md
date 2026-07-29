@@ -2,7 +2,7 @@
 
 Local desktop Gaussian Splatting workspace for Windows.
 
-SplatStudio is designed as a one-click `.exe` app: users should be able to add a video, image sequence, or folder of extracted frames and produce local `.splat` / `.ply` assets without installing Node, Python, FFmpeg, COLMAP, or Python packages separately.
+SplatStudio turns a video, image sequence, or folder of frames into local `.splat` and `.ply` assets. The desktop app runs an entirely local FFmpeg → COLMAP → gsplat pipeline, reports runtime readiness before a job starts, persists job outputs, and includes a real-time viewer.
 
 ## Development
 
@@ -22,20 +22,37 @@ Desktop development:
 npm run electron:dev
 ```
 
-Build the Windows installer:
+Run the full project check:
 
 ```powershell
-npm run build:exe
+npm run check
 ```
 
-## Bundled Runtime
+## Reconstruction Runtime
 
-The packaged app includes the `bin` directory as Electron extra resources:
+During development, SplatStudio looks for tools in `bin` first and then on the system `PATH`:
 
-- `ffmpeg.exe`
-- `colmap.exe` and required DLLs
-- embedded Python
-- PyTorch CUDA runtime
-- OpenCV, `plyfile`, `gsplat`, and trainer scripts
+- FFmpeg (video inputs only)
+- COLMAP
+- Python with PyTorch, OpenCV, `plyfile`, and `gsplat`
+- `bin/train_splat.py`
+
+The Reconstruction and Settings screens show which tools were detected and whether image or video processing is ready.
+
+## Windows Packaging
+
+The standalone NSIS installer must contain the complete runtime:
+
+- `bin/ffmpeg.exe`
+- `bin/colmap.exe` and its DLLs
+- `bin/python/python.exe` and required Python packages
+- `bin/train_splat.py`
+
+Verify and build the installer:
+
+```powershell
+npm run verify:runtime
+npm run build:exe
+```
 
 Runtime projects, uploads, jobs, and exports are stored in the app workspace directory, not beside the installed executable.

@@ -12,6 +12,7 @@ declare global {
     splatStudio?: {
       selectInputs: (mode: 'files' | 'folder') => Promise<SplatStudioInputItem[]>;
       selectSplatFile: () => Promise<string | null>;
+      openExportsFolder: () => Promise<{ success: boolean; error?: string | null }>;
     };
   }
 }

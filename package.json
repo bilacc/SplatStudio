@@ -1,7 +1,7 @@
 {
   "name": "splatstudio",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Local desktop Gaussian Splatting workspace for Windows",
   "author": "SplatStudio",
   "type": "module",
@@ -13,8 +13,12 @@
     "preview": "vite preview",
     "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
     "lint": "tsc --noEmit",
+    "test:smoke": "node scripts/smoke-server.mjs",
+    "check": "npm run lint && npm run build && npm run test:smoke",
+    "verify:runtime": "node scripts/verify-runtime.mjs",
     "electron:dev": "electron .",
-    "build:exe": "npm run build && electron-builder --win"
+    "build:exe": "npm run verify:runtime && npm run build && electron-builder --win nsis",
+    "build:dir": "npm run build && electron-builder --win dir"
   },
   "build": {
     "appId": "com.splatstudio.app",
@@ -23,8 +27,14 @@
       "output": "release"
     },
     "win": {
-      "target": "dir",
+      "target": "nsis",
       "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     },
     "extraResources": [
       {
