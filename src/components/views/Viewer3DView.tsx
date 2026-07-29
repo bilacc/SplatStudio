@@ -49,7 +49,6 @@ function MKKSplat({ url }: { url: string }) {
 
 export function Viewer3DView() {
   const { progress, logs } = useAppStore();
-  const [wireframe, setWireframe] = useState(false);
   const [lighting, setLighting] = useState(true);
   const [splatUrl, setSplatUrl] = useState<string | null>(null);
   const [modelType, setModelType] = useState<'none' | 'native' | 'custom'>('none');
@@ -132,24 +131,15 @@ export function Viewer3DView() {
               <strong className="text-blue-400 font-medium">FILE:</strong> {modelName}
             </span>
           )}
-          <span><strong className="text-blue-400 font-medium">FPS:</strong> 60.0</span>
         </div>
         <div className="bg-black/60 backdrop-blur-md px-1.5 py-1.5 rounded-lg border border-white/10 flex gap-1 items-center shadow-lg shadow-black/20">
           <button 
             onClick={handleImportCustom}
-            disabled={isImporting}
+            disabled={isImporting || !window.splatStudio?.selectSplatFile}
             className="px-2 py-0.5 rounded transition-colors text-[11px] font-semibold text-white bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:text-gray-400 hover:text-white"
             title="Import custom .splat or .ply model"
           >
             {isImporting ? 'Importing...' : 'Import Splat/PLY'}
-          </button>
-          <div className="w-px h-3 bg-white/10 mx-1"></div>
-          <button 
-            onClick={() => setWireframe(!wireframe)}
-            className={cn("px-2 py-0.5 rounded transition-colors text-[11px] font-medium hover:bg-white/10", wireframe ? "text-blue-400 bg-white/5" : "text-gray-400 hover:text-white")}
-            title="Wireframe Mode"
-          >
-            Wireframe
           </button>
           <div className="w-px h-3 bg-white/10 mx-1"></div>
           <button 
@@ -158,13 +148,6 @@ export function Viewer3DView() {
             title="Toggle Lighting"
           >
             Lighting
-          </button>
-          <div className="w-px h-3 bg-white/10 mx-1"></div>
-          <button 
-            className="px-2 py-0.5 rounded transition-colors text-[11px] font-medium text-purple-400 bg-white/5 hover:bg-white/10"
-            title="Bounding Box Crop"
-          >
-            Crop Box (AABB)
           </button>
         </div>
       </div>
