@@ -42,6 +42,195 @@ function pathExists(target) {
   }
 }
 
+function findExecutableOnPath(fileNames) {
+  const searchDirectories = (process.env.PATH || '')
+    .split(path.delimiter)
+    .map((entry) => entry.replace(/^"|"$/g, '').trim())
+    .filter(Boolean);
+
+  for (const directory of searchDirectories) {
+    for (const fileName of fileNames) {
+      const candidate = path.join(directory, fileName);
+      if (pathExists(candidate)) return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveRuntimeTool(label, bundledCandidates, pathNames) {
+  const bundled = bundledCandidates.find(pathExists);
+  if (bundled) {
+    return { label, available: true, path: bundled, source: 'bundled' };
+  }
+
+  const system = findExecutableOnPath(pathNames);
+  if (system) {
+    return { label, available: true, path: system, source: 'system' };
+  }
+
+  return { label, available: false, path: null, source: null };
+}
+
+function resolveRuntimeTools(binDir) {
+  const executableSuffix = process.platform === 'win32' ? '.exe' : '';
+  return {
+    ffmpeg: resolveRuntimeTool(
+      'FFmpeg',
+      [path.join(binDir, `ffmpeg${executableSuffix}`), path.join(binDir, 'ffmpeg.exe')],
+      [`ffmpeg${executableSuffix}`, 'ffmpeg'],
+    ),
+    colmap: resolveRuntimeTool(
+      'COLMAP',
+      [
+        path.join(binDir, `colmap${executableSuffix}`),
+        path.join(binDir, 'colmap.exe'),
+        path.join(binDir, 'colmap', 'colmap.exe'),
+      ],
+      [`colmap${executableSuffix}`, 'colmap'],
+    ),
+    python: resolveRuntimeTool(
+      'Python',
+      [
+        path.join(binDir, 'python', 'python.exe'),
+        path.join(binDir, `python${executableSuffix}`),
+      ],
+      process.platform === 'win32' ? ['python.exe', 'python3.exe'] : ['python3', 'python'],
+    ),
+    trainer: resolveRuntimeTool(
+      'gsplat trainer',
+      [path.join(binDir, 'train_splat.py'), path.join(__dirname, 'bin', 'train_splat.py')],
+      [],
+    ),
+    pythonPackages: {
+      label: 'Python ML packages',
+      available: false,
+      path: null,
+      source: null,
+      missingModules: [],
+    },
+  };
+}
+
+function summarizeRuntime(tools, binDir, workspaceRoot) {
+  const imageTools = ['colmap', 'python', 'pythonPackages', 'trainer'];
+  const missingForImages = imageTools.filter((key) => !tools[key].available);
+  const missingForVideo = [
+    ...missingForImages,
+    ...(!tools.ffmpeg.available ? ['ffmpeg'] : []),
+  ];
+
+  return {
+    workspaceRoot,
+    binDir,
+    tools,
+    readyForImages: missingForImages.length === 0,
+    readyForVideo: missingForVideo.length === 0,
+    missingForImages,
+    missingForVideo,
+  };
+}
+
+function probePythonPackages(pythonTool, binDir) {
+  if (!pythonTool.available) {
+    return Promise.resolve({
+      label: 'Python ML packages',
+      available: false,
+      path: null,
+      source: null,
+      missingModules: ['torch', 'gsplat', 'cv2', 'numpy', 'plyfile', 'tqdm'],
+    });
+  }
+
+  const script = [
+    "import importlib.util,json",
+    "mods=['torch','gsplat','cv2','numpy','plyfile','tqdm']",
+    "missing=[m for m in mods if importlib.util.find_spec(m) is None]",
+    "print(json.dumps({'missing':missing}))",
+  ].join(';');
+
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(pythonTool.path, ['-c', script], {
+        env: buildToolEnv(binDir),
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolve({
+        label: 'Python ML packages',
+        available: false,
+        path: null,
+        source: pythonTool.source,
+        missingModules: [error.message],
+      });
+      return;
+    }
+    let stdout = '';
+    let settled = false;
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      resolve(payload);
+    };
+
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      finish({
+        label: 'Python ML packages',
+        available: false,
+        path: null,
+        source: pythonTool.source,
+        missingModules: ['probe timed out'],
+      });
+    }, 10000);
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    proc.on('error', (error) => {
+      clearTimeout(timer);
+      finish({
+        label: 'Python ML packages',
+        available: false,
+        path: null,
+        source: pythonTool.source,
+        missingModules: [error.message],
+      });
+    });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const data = JSON.parse(stdout.trim() || '{}');
+        const missingModules = Array.isArray(data.missing) ? data.missing : ['unknown'];
+        finish({
+          label: 'Python ML packages',
+          available: missingModules.length === 0,
+          path: pythonTool.path,
+          source: pythonTool.source,
+          missingModules,
+        });
+      } catch {
+        finish({
+          label: 'Python ML packages',
+          available: false,
+          path: null,
+          source: pythonTool.source,
+          missingModules: ['probe failed'],
+        });
+      }
+    });
+  });
+}
+
+async function runtimeSnapshot(binDir, workspaceRoot) {
+  const tools = resolveRuntimeTools(binDir);
+  tools.pythonPackages = await probePythonPackages(tools.python, binDir);
+  return summarizeRuntime(tools, binDir, workspaceRoot);
+}
+
 function safeBaseName(name) {
   return path
     .basename(name)
@@ -286,16 +475,17 @@ export async function startServer(options = {}) {
   [uploadRoot, dataRoot, jobsRoot, exportsRoot].forEach(ensureDir);
 
   const upload = createUploadMiddleware(uploadRoot);
+  const existingOutputSplat = path.join(exportsRoot, "output.splat");
 
   const pipelineState = {
     isRunning: false,
     abortRequested: false,
-    progress: 0,
+    progress: pathExists(existingOutputSplat) ? 100 : 0,
     logs: [],
     activeProcesses: new Map(),
     currentJobId: null,
     currentOutputDir: exportsRoot,
-    outputKind: null,
+    outputKind: pathExists(existingOutputSplat) ? "trained" : null,
   };
 
   const addLog = (message, type = "info") => {
@@ -303,6 +493,62 @@ export async function startServer(options = {}) {
     if (pipelineState.logs.length > MAX_LOGS) {
       pipelineState.logs.splice(0, pipelineState.logs.length - MAX_LOGS);
     }
+  };
+
+  const describeFile = (baseDir, fileName, downloadPrefix = '/api/export') => {
+    const candidate = path.join(baseDir, fileName);
+    if (!pathExists(candidate)) return null;
+    const stats = fs.statSync(candidate);
+    return {
+      name: fileName,
+      size: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+      downloadUrl: `${downloadPrefix}/${encodeURIComponent(fileName)}`,
+    };
+  };
+
+  const listJobEntries = () => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(exportsRoot, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+
+    return entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('job-'))
+      .map((entry) => {
+        const jobDir = path.join(exportsRoot, entry.name);
+        const stats = fs.statSync(jobDir);
+        const progressPath = path.join(jobDir, 'training_progress.json');
+        let progressData = null;
+        try {
+          progressData = JSON.parse(fs.readFileSync(progressPath, 'utf-8'));
+        } catch {}
+
+        const files = [
+          describeFile(jobDir, 'output.splat', `/api/jobs/${encodeURIComponent(entry.name)}/export`),
+          describeFile(jobDir, 'splat.ply', `/api/jobs/${encodeURIComponent(entry.name)}/export`),
+        ].filter(Boolean);
+
+        return {
+          id: entry.name,
+          createdAt: stats.birthtime.toISOString(),
+          modifiedAt: stats.mtime.toISOString(),
+          status: pipelineState.isRunning && pipelineState.currentJobId === entry.name
+            ? 'running'
+            : progressData?.draft
+              ? 'draft'
+              : progressData?.complete && files.length > 0
+                ? 'complete'
+                : 'failed',
+          progress: pipelineState.currentJobId === entry.name
+            ? pipelineState.progress
+            : Number(progressData?.progress_pct || (files.length > 0 ? 100 : 0)),
+          files,
+        };
+      })
+      .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
   };
 
   const killActiveProcesses = () => {
@@ -369,8 +615,6 @@ export async function startServer(options = {}) {
     }
   };
 
-  const getBin = (...segments) => path.join(binDir, ...segments);
-
   app.use(express.json({ limit: "25mb" }));
 
   app.post("/api/upload", upload.array("files"), (req, res) => {
@@ -385,13 +629,9 @@ export async function startServer(options = {}) {
     });
   });
 
-  app.get("/api/runtime-info", (_req, res) => {
+  app.get("/api/runtime-info", async (_req, res) => {
     res.json({
-      workspaceRoot,
-      binDir,
-      hasColmap: pathExists(getBin("colmap.exe")),
-      hasFfmpeg: pathExists(getBin("ffmpeg.exe")),
-      hasPython: pathExists(getBin("python", "python.exe")),
+      ...(await runtimeSnapshot(binDir, workspaceRoot)),
       currentJobId: pipelineState.currentJobId,
       outputKind: pipelineState.outputKind,
     });
@@ -399,9 +639,9 @@ export async function startServer(options = {}) {
 
   app.get("/api/gpu-info", async (_req, res) => {
     try {
-      const pythonExe = getBin("python", "python.exe");
-      if (!pathExists(pythonExe)) {
-        return res.json({ available: false, error: "Bundled Python was not found." });
+      const pythonTool = resolveRuntimeTools(binDir).python;
+      if (!pythonTool.available) {
+        return res.json({ available: false, error: "Python was not found in the bundled runtime or PATH." });
       }
 
       const script = [
@@ -417,7 +657,7 @@ export async function startServer(options = {}) {
       ].join(";");
 
       const output = await new Promise((resolve) => {
-        const proc = spawn(pythonExe, ["-c", script], {
+        const proc = spawn(pythonTool.path, ["-c", script], {
           env: buildToolEnv(binDir),
           shell: false,
           windowsHide: true,
@@ -436,22 +676,32 @@ export async function startServer(options = {}) {
     }
   });
 
-  app.post("/api/pipeline/start", (req, res) => {
+  app.post("/api/pipeline/start", async (req, res) => {
     if (pipelineState.isRunning) {
       return res.status(409).json({ error: "Pipeline already running" });
     }
 
+    const runtime = await runtimeSnapshot(binDir, workspaceRoot);
+    if (!runtime.readyForImages) {
+      const missing = runtime.missingForImages.map((key) => runtime.tools[key].label).join(', ');
+      return res.status(503).json({
+        error: `Runtime is incomplete. Install or bundle: ${missing}.`,
+        runtime,
+      });
+    }
+
+    const jobId = `job-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     pipelineState.isRunning = true;
     pipelineState.abortRequested = false;
     pipelineState.progress = 0;
     pipelineState.logs = [];
     pipelineState.outputKind = null;
+    pipelineState.currentJobId = jobId;
 
     addLog("Starting local Gaussian Splat reconstruction pipeline...", "info");
 
     (async () => {
       try {
-        const jobId = `job-${new Date().toISOString().replace(/[:.]/g, "-")}`;
         const jobRoot = path.join(jobsRoot, jobId);
         const targetDataDir = path.join(jobRoot, "colmap");
         const imagesDir = path.join(targetDataDir, "images");
@@ -459,7 +709,6 @@ export async function startServer(options = {}) {
         const outputDir = path.join(exportsRoot, jobId);
         const uploadId = typeof req.body.uploadId === "string" ? req.body.uploadId : null;
 
-        pipelineState.currentJobId = jobId;
         pipelineState.currentOutputDir = outputDir;
 
         [targetDataDir, imagesDir, sparseDir, outputDir].forEach(ensureDir);
@@ -484,10 +733,26 @@ export async function startServer(options = {}) {
         if (videos.length === 0 && images.length < 2) {
           throw new Error("Add at least two input images, a folder of frames, or one video.");
         }
+        if (videos.length === 1 && !runtime.tools.ffmpeg.available) {
+          throw new Error("FFmpeg is required for video input. Add it to bin/ or install it on PATH.");
+        }
 
         const extractFps = clampNumber(req.body.extractFps, 2, 0.1, 60);
         const maxIterations = Math.round(clampNumber(req.body.maxIterations, 7000, 1, 100000));
         const resolution = clampNumber(req.body.resolution, 0.5, 0.05, 1);
+        const featureQuality = ['low', 'medium', 'high', 'ultra'].includes(req.body.featureQuality)
+          ? req.body.featureQuality
+          : 'high';
+        const scenePreset = ['object', 'indoor', 'city'].includes(req.body.scenePreset)
+          ? req.body.scenePreset
+          : 'object';
+        const qualitySettings = {
+          low: { maxFeatures: 4096, peakThreshold: 0.02 },
+          medium: { maxFeatures: 8192, peakThreshold: 0.01 },
+          high: { maxFeatures: 16384, peakThreshold: 0.0067 },
+          ultra: { maxFeatures: 32768, peakThreshold: 0.004 },
+        }[featureQuality];
+        addLog(`[Pipeline] Quality: ${featureQuality} | Scene: ${scenePreset}`, "info");
 
         if (req.body.engine && req.body.engine !== "gsplat") {
           addLog(`[Pipeline] Engine "${req.body.engine}" is not bundled. Using local gsplat pipeline.`, "warn");
@@ -497,7 +762,7 @@ export async function startServer(options = {}) {
           pipelineState.progress = 5;
           addLog(`[FFmpeg] Extracting frames at ${extractFps} FPS from ${path.basename(videos[0])}...`, "info");
           const code = await runProcess(
-            getBin("ffmpeg.exe"),
+            runtime.tools.ffmpeg.path,
             [
               "-y",
               "-i",
@@ -527,7 +792,7 @@ export async function startServer(options = {}) {
         addLog("[COLMAP] Starting feature extraction...", "info");
         const dbPath = path.join(targetDataDir, "database.db");
         let code = await runProcess(
-          getBin("colmap.exe"),
+          runtime.tools.colmap.path,
           [
             "feature_extractor",
             "--database_path",
@@ -538,13 +803,20 @@ export async function startServer(options = {}) {
             "1",
             "--SiftExtraction.use_gpu",
             "1",
+            "--SiftExtraction.max_num_features",
+            String(qualitySettings.maxFeatures),
+            "--SiftExtraction.peak_threshold",
+            String(qualitySettings.peakThreshold),
           ],
           { label: "COLMAP" },
         );
         requireCodeZero(code, "COLMAP feature extraction failed.");
         pipelineState.progress = 24;
 
-        const useSequentialMatching = videos.length === 1 || preparedImages.length >= 80;
+        const useSequentialMatching = scenePreset === 'city'
+          || videos.length === 1
+          || preparedImages.length >= (scenePreset === 'indoor' ? 50 : 80);
+        const sequentialOverlap = scenePreset === 'city' ? 20 : scenePreset === 'indoor' ? 15 : 10;
         addLog(
           `[COLMAP] Running ${useSequentialMatching ? "sequential" : "exhaustive"} matching...`,
           "info",
@@ -558,7 +830,7 @@ export async function startServer(options = {}) {
               "--SiftMatching.use_gpu",
               "1",
               "--SequentialMatching.overlap",
-              "10",
+              String(sequentialOverlap),
             ]
           : [
               "exhaustive_matcher",
@@ -568,13 +840,13 @@ export async function startServer(options = {}) {
               "1",
             ];
 
-        code = await runProcess(getBin("colmap.exe"), matcherArgs, { label: "COLMAP" });
+        code = await runProcess(runtime.tools.colmap.path, matcherArgs, { label: "COLMAP" });
         requireCodeZero(code, "COLMAP matching failed.");
         pipelineState.progress = 35;
 
         addLog("[COLMAP] Running sparse reconstruction...", "info");
         code = await runProcess(
-          getBin("colmap.exe"),
+          runtime.tools.colmap.path,
           [
             "mapper",
             "--database_path",
@@ -611,9 +883,9 @@ export async function startServer(options = {}) {
         }, 3000);
 
         code = await runProcess(
-          getBin("python", "python.exe"),
+          runtime.tools.python.path,
           [
-            getBin("train_splat.py"),
+            runtime.tools.trainer.path,
             "--input",
             targetDataDir,
             "--output",
@@ -668,7 +940,7 @@ export async function startServer(options = {}) {
       }
     })();
 
-    return res.json({ success: true, mode: "native" });
+    return res.json({ success: true, mode: "native", jobId });
   });
 
   app.post("/api/pipeline/abort", (_req, res) => {
@@ -688,6 +960,40 @@ export async function startServer(options = {}) {
       currentJobId: pipelineState.currentJobId,
       outputKind: pipelineState.outputKind,
     });
+  });
+
+  app.get("/api/jobs", (_req, res) => {
+    res.json({ jobs: listJobEntries() });
+  });
+
+  app.get("/api/exports", (_req, res) => {
+    const outputDir = pipelineState.currentOutputDir || exportsRoot;
+    const files = [
+      describeFile(outputDir, 'output.splat'),
+      describeFile(outputDir, 'splat.ply'),
+    ].filter(Boolean);
+
+    res.json({
+      jobId: pipelineState.currentJobId,
+      outputKind: pipelineState.outputKind,
+      files,
+    });
+  });
+
+  app.get("/api/jobs/:jobId/export/:fileName", (req, res) => {
+    const allowedFiles = new Set(["output.splat", "splat.ply"]);
+    const jobId = String(req.params.jobId || '');
+    const fileName = safeBaseName(req.params.fileName || "");
+    if (!/^job-[A-Za-z0-9-]+$/.test(jobId) || !allowedFiles.has(fileName)) {
+      return res.status(404).json({ error: "Unknown job export." });
+    }
+
+    const candidate = path.join(exportsRoot, jobId, fileName);
+    if (!pathExists(candidate)) {
+      return res.status(404).json({ error: "Job export file not found." });
+    }
+
+    return res.download(candidate, fileName);
   });
 
   app.head("/api/output.splat", (_req, res) => {

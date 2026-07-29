@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -66,6 +66,13 @@ ipcMain.handle('splatstudio:select-splat-file', async (_event) => {
   return result.filePaths[0];
 });
 
+ipcMain.handle('splatstudio:open-exports', async () => {
+  const exportsDir = path.join(app.getPath('userData'), 'workspace', 'exports');
+  fs.mkdirSync(exportsDir, { recursive: true });
+  const error = await shell.openPath(exportsDir);
+  return { success: !error, error: error || null };
+});
+
 app.whenReady().then(async () => {
   const binDir = getBinDir();
 
@@ -92,7 +99,9 @@ app.whenReady().then(async () => {
   });
 
   mainWindow.loadURL(localServer.url);
-  mainWindow.webContents.openDevTools();
+  if (!app.isPackaged) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 });
 
 app.on('window-all-closed', () => {

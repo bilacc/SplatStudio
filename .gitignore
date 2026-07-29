@@ -22,3 +22,4 @@ exports/
 # Electron build output
 release/
 out/
+.smoke-workspace/
