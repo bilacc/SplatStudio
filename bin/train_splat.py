@@ -4,6 +4,7 @@ Uses gsplat library for GPU-accelerated training.
 Designed to work with COLMAP output directories.
 """
 import sys
+import traceback
 import os
 import json
 import struct
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import optim
+from torch.utils.checkpoint import checkpoint
 from tqdm import tqdm
 
 try:
@@ -32,6 +34,32 @@ except ImportError:
     sys.exit(1)
 
 import cv2
+
+COLMAP_CAMERA_MODELS = {
+    0: ('SIMPLE_PINHOLE', 3),
+    1: ('PINHOLE', 4),
+    2: ('SIMPLE_RADIAL', 4),
+    3: ('RADIAL', 5),
+    4: ('OPENCV', 8),
+    5: ('OPENCV_FISHEYE', 8),
+    6: ('FULL_OPENCV', 12),
+    7: ('FOV', 5),
+    8: ('SIMPLE_RADIAL_FISHEYE', 4),
+    9: ('RADIAL_FISHEYE', 5),
+    10: ('THIN_PRISM_FISHEYE', 12),
+    11: ('RAD_TAN_THIN_PRISM_FISHEYE', 16),
+    12: ('SIMPLE_DIVISION', 4),
+    13: ('DIVISION', 5),
+    14: ('SIMPLE_FISHEYE', 3),
+    15: ('FISHEYE', 4),
+    16: ('EUCM', 6),
+    17: ('EQUIRECTANGULAR', 2),
+}
+
+SIMPLE_FOCAL_MODELS = {
+    'SIMPLE_PINHOLE', 'SIMPLE_RADIAL', 'RADIAL', 'SIMPLE_RADIAL_FISHEYE',
+    'RADIAL_FISHEYE', 'SIMPLE_DIVISION', 'SIMPLE_FISHEYE',
+}
 
 def ssim(img1, img2, window_size=11, size_average=True):
     channel = img1.size(-3)
@@ -75,6 +103,73 @@ def gsplat_cuda_available():
         return False
 
 
+def select_device(requested):
+    """Resolve a requested backend to a real PyTorch device."""
+    requested = (requested or 'auto').lower()
+    requested_base, _, requested_index = requested.partition(':')
+
+    cuda_available = bool(torch.cuda.is_available())
+    is_rocm = bool(getattr(torch.version, 'hip', None))
+    xpu = getattr(torch, 'xpu', None)
+    xpu_available = bool(xpu is not None and xpu.is_available())
+    mps = getattr(getattr(torch, 'backends', None), 'mps', None)
+    mps_available = bool(mps is not None and mps.is_available())
+
+    if requested_base == 'auto':
+        if cuda_available:
+            requested_base = 'rocm' if is_rocm else 'cuda'
+        elif xpu_available:
+            requested_base = 'xpu'
+        elif mps_available:
+            requested_base = 'mps'
+        else:
+            requested_base = 'cpu'
+
+    index = int(requested_index) if requested_index.isdigit() else 0
+    if requested_base == 'cuda':
+        if not cuda_available or is_rocm:
+            raise RuntimeError('CUDA was requested, but an NVIDIA CUDA PyTorch device is not available.')
+        return torch.device(f'cuda:{index}'), 'cuda'
+    if requested_base == 'rocm':
+        if not cuda_available or not is_rocm:
+            raise RuntimeError('ROCm was requested, but a ROCm PyTorch device is not available.')
+        return torch.device(f'cuda:{index}'), 'rocm'
+    if requested_base == 'xpu':
+        if not xpu_available:
+            raise RuntimeError('XPU was requested, but an Intel XPU PyTorch device is not available.')
+        return torch.device(f'xpu:{index}'), 'xpu'
+    if requested_base == 'mps':
+        if not mps_available:
+            raise RuntimeError('MPS was requested, but Apple Metal Performance Shaders are not available.')
+        return torch.device('mps'), 'mps'
+    if requested_base == 'directml':
+        try:
+            import torch_directml
+            return torch_directml.device(index), 'directml'
+        except Exception as exc:
+            raise RuntimeError(f'DirectML was requested, but torch-directml is unavailable: {exc}') from exc
+    if requested_base == 'cpu':
+        return torch.device('cpu'), 'cpu'
+    raise RuntimeError(f'Unknown compute backend: {requested}')
+
+
+def describe_device(device, backend):
+    if backend in ('cuda', 'rocm'):
+        props = torch.cuda.get_device_properties(device)
+        return torch.cuda.get_device_name(device), props.total_memory / 1024**3
+    if backend == 'xpu':
+        return torch.xpu.get_device_name(device), None
+    if backend == 'mps':
+        return 'Apple Metal GPU', None
+    if backend == 'directml':
+        try:
+            import torch_directml
+            return torch_directml.device_name(device.index or 0), None
+        except Exception:
+            return 'DirectML GPU', None
+    return os.environ.get('PROCESSOR_IDENTIFIER') or 'CPU', None
+
+
 def read_colmap_cameras(cameras_path):
     """Read COLMAP cameras.bin or cameras.txt"""
     cameras = {}
@@ -98,9 +193,9 @@ def read_colmap_cameras(cameras_path):
                 model_id = struct.unpack('<i', f.read(4))[0]
                 w = struct.unpack('<Q', f.read(8))[0]
                 h = struct.unpack('<Q', f.read(8))[0]
-                model_names = {0: 'SIMPLE_PINHOLE', 1: 'PINHOLE', 2: 'SIMPLE_RADIAL', 3: 'RADIAL'}
-                model = model_names.get(model_id, 'UNKNOWN')
-                num_params = {0: 3, 1: 4, 2: 4, 3: 5}.get(model_id, 4)
+                if model_id not in COLMAP_CAMERA_MODELS:
+                    raise ValueError(f'Unsupported COLMAP camera model id {model_id}')
+                model, num_params = COLMAP_CAMERA_MODELS[model_id]
                 params = list(struct.unpack(f'<{num_params}d', f.read(8 * num_params)))
                 cameras[cam_id] = {'model': model, 'width': w, 'height': h, 'params': params}
     return cameras
@@ -111,20 +206,24 @@ def read_colmap_images(images_path):
     images = []
     if images_path.suffix == '.txt':
         with open(images_path, 'r') as f:
-            lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+            lines = f.readlines()
         i = 0
         while i < len(lines):
-            parts = lines[i].split()
+            line = lines[i].strip()
+            if not line or line.startswith('#'):
+                i += 1
+                continue
+            parts = line.split()
             img_id = int(parts[0])
             qw, qx, qy, qz = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
             tx, ty, tz = float(parts[5]), float(parts[6]), float(parts[7])
             cam_id = int(parts[8])
-            name = parts[9]
+            name = ' '.join(parts[9:])
             images.append({
                 'id': img_id, 'qvec': [qw, qx, qy, qz],
                 'tvec': [tx, ty, tz], 'camera_id': cam_id, 'name': name
             })
-            i += 2  # Skip points2D line
+            i += 2  # The following raw line contains POINTS2D and may be empty.
     else:
         with open(images_path, 'rb') as f:
             num_images = struct.unpack('<Q', f.read(8))[0]
@@ -218,6 +317,29 @@ def qvec_to_rotmat(qvec):
     return R
 
 
+def camera_intrinsics(camera, scale_x, scale_y):
+    """Return an approximate pinhole K for every perspective COLMAP model."""
+    model = camera['model']
+    params = camera['params']
+    if model == 'EQUIRECTANGULAR':
+        raise ValueError('EQUIRECTANGULAR cameras are not supported by the Gaussian trainer.')
+    if model in SIMPLE_FOCAL_MODELS:
+        if len(params) < 3:
+            raise ValueError(f'Camera model {model} has too few parameters.')
+        fx = params[0] * scale_x
+        fy = params[0] * scale_y
+        cx = params[1] * scale_x
+        cy = params[2] * scale_y
+    else:
+        if len(params) < 4:
+            raise ValueError(f'Camera model {model} has too few parameters.')
+        fx = params[0] * scale_x
+        fy = params[1] * scale_y
+        cx = params[2] * scale_x
+        cy = params[3] * scale_y
+    return fx, fy, cx, cy
+
+
 def save_splat_binary(path, means, scales, quats, opacities, sh_coeffs):
     """Save to .splat binary format for web viewers"""
     n = means.shape[0]
@@ -274,9 +396,11 @@ def save_ply(path, means, scales, quats, opacities, sh_coeffs):
     arr['f_dc_1'] = sh[:, 0, 1]
     arr['f_dc_2'] = sh[:, 0, 2]
     arr['opacity'] = o.squeeze()
-    arr['scale_0'] = s[:, 0]
-    arr['scale_1'] = s[:, 1]
-    arr['scale_2'] = s[:, 2]
+    # The standard 3DGS PLY format stores logarithmic scales.
+    log_scales = np.log(np.clip(s, 1e-8, None))
+    arr['scale_0'] = log_scales[:, 0]
+    arr['scale_1'] = log_scales[:, 1]
+    arr['scale_2'] = log_scales[:, 2]
     arr['rot_0'] = q[:, 0]
     arr['rot_1'] = q[:, 1]
     arr['rot_2'] = q[:, 2]
@@ -319,7 +443,7 @@ def write_progress(output_dir, payload):
 def finish_with_draft(args, reason, means, scales, quats, opacities, sh_coeffs):
     print(f"[WARN] {reason}")
     if not args.allow_draft_output:
-        print("[ERROR] Native gsplat training is unavailable and draft output is disabled.")
+        print("[ERROR] Gaussian training is unavailable and draft output is disabled.")
         sys.exit(2)
 
     print("[SplatStudio] Exporting COLMAP-initialized draft splat.")
@@ -332,7 +456,8 @@ def finish_with_draft(args, reason, means, scales, quats, opacities, sh_coeffs):
         'progress_pct': 100.0,
         'complete': True,
         'draft': True,
-        'reason': reason
+        'reason': reason,
+        'backend': args.device,
     })
     print("[SplatStudio] Draft export complete.")
 
@@ -347,20 +472,49 @@ def quat_to_rotmat_fallback(q):
     ], dim=-1).reshape(q.shape[:-1] + (3, 3))
     return R
 
-def vectorized_pytorch_rasterize(means, quats, scales, opacities, colors, viewmat, K, H, W, device):
+def vectorized_pytorch_rasterize(
+    means, quats, scales, opacities, colors, viewmat, K, H, W, device,
+    point_chunk_size=1024,
+):
     """
-    100% Vectorized, loop-free, differentiable Gaussian Splatting rasterizer.
-    Runs in milliseconds on any GPU/CPU without custom CUDA compilation!
+    Differentiable PyTorch Gaussian rasterizer with bounded working memory.
+
+    Splats are depth-sorted globally, then composited in point chunks. Gradient
+    checkpointing avoids retaining a pixels-by-all-points tensor for backward.
     """
+    debug_sync_enabled = os.environ.get('SPLATSTUDIO_DEBUG_TRAINER') == '1'
+
+    def debug_sync(label, tensor):
+        if not debug_sync_enabled:
+            return
+        try:
+            cpu_value = tensor.detach().cpu()
+            flat = cpu_value.reshape(-1)
+            sample = flat[:1].tolist()
+            finite = torch.isfinite(flat)
+            finite_values = flat[finite]
+            value_range = (
+                (float(finite_values.min()), float(finite_values.max()))
+                if finite_values.numel() else None
+            )
+            print(
+                f'[Trainer debug] {label}: shape={tuple(tensor.shape)} '
+                f'sample={sample} range={value_range} nonfinite={int((~finite).sum())}'
+            )
+        except Exception:
+            print(f'[Trainer debug] DirectML execution failed at stage: {label}')
+            raise
+
     # 1. Transform points to camera space
     R_w2c = viewmat[:3, :3]
     t_w2c = viewmat[:3, 3]
     means_c = torch.matmul(means, R_w2c.t()) + t_w2c
+    debug_sync('camera transform', means_c)
     
     # Filter points behind camera
     valid_mask = means_c[:, 2] > 0.01
     if not valid_mask.any():
-        return torch.ones(H, W, 3, device=device)
+        return torch.ones(H, W, 3, device=device) + means.sum() * 0.0
         
     means_c = means_c[valid_mask]
     quats = quats[valid_mask]
@@ -396,10 +550,27 @@ def vectorized_pytorch_rasterize(means, quats, scales, opacities, colors, viewma
     
     covcam = torch.matmul(R_w2c, torch.matmul(cov3d, R_w2c.t()))
     cov2d = torch.matmul(J, torch.matmul(covcam, J.transpose(-1, -2)))[:, :2, :2]
+    debug_sync('covariance projection', cov2d)
     
     # Add diagonal regularization to prevent singularity
     cov2d[:, 0, 0] += 0.3
     cov2d[:, 1, 1] += 0.3
+
+    # Drop splats whose 3-sigma footprint cannot touch the image.
+    radii = 3.0 * torch.sqrt(torch.clamp(torch.maximum(cov2d[:, 0, 0], cov2d[:, 1, 1]), min=1e-6))
+    screen_mask = (
+        (xys[:, 0] + radii >= 0)
+        & (xys[:, 0] - radii < W)
+        & (xys[:, 1] + radii >= 0)
+        & (xys[:, 1] - radii < H)
+    )
+    if not screen_mask.any():
+        return torch.ones(H, W, 3, device=device) + means.sum() * 0.0
+    xys = xys[screen_mask]
+    cov2d = cov2d[screen_mask]
+    means_c = means_c[screen_mask]
+    opacities = opacities[screen_mask]
+    colors = colors[screen_mask]
     
     # 5. Compute conics (inverse of 2D covariance)
     det = cov2d[:, 0, 0] * cov2d[:, 1, 1] - cov2d[:, 0, 1] * cov2d[:, 1, 0]
@@ -409,6 +580,7 @@ def vectorized_pytorch_rasterize(means, quats, scales, opacities, colors, viewma
     inv_cov2d[:, 1, 1] = cov2d[:, 0, 0] / det
     inv_cov2d[:, 0, 1] = -cov2d[:, 0, 1] / det
     inv_cov2d[:, 1, 0] = -cov2d[:, 1, 0] / det
+    debug_sync('inverse covariance', inv_cov2d)
     
     # 6. Vectorized grid evaluation
     y_coords, x_coords = torch.meshgrid(
@@ -417,49 +589,128 @@ def vectorized_pytorch_rasterize(means, quats, scales, opacities, colors, viewma
         indexing='ij'
     )
     grid = torch.stack([x_coords, y_coords], dim=-1).reshape(H * W, 2)
+    debug_sync('pixel grid', grid)
     
     depths = means_c[:, 2]
     sorted_idx = torch.argsort(depths, descending=False)
     
-    xys = xys[sorted_idx]
-    inv_cov2d = inv_cov2d[sorted_idx]
-    opacities = opacities[sorted_idx]
-    colors = colors[sorted_idx]
-    
-    d = grid.unsqueeze(1) - xys.unsqueeze(0)
+    # DirectML in particular requires contiguous tensors for several
+    # broadcasted elementwise kernels after advanced indexing.
+    xys = xys[sorted_idx].contiguous()
+    inv_cov2d = inv_cov2d[sorted_idx].contiguous()
+    opacities = opacities[sorted_idx].contiguous()
+    colors = colors[sorted_idx].contiguous()
     
     inv_a = inv_cov2d[:, 0, 0]
     inv_b = inv_cov2d[:, 0, 1]
     inv_c = inv_cov2d[:, 1, 1]
-    
-    power = -0.5 * (
-        inv_a.unsqueeze(0) * d[..., 0]**2 +
-        2.0 * inv_b.unsqueeze(0) * d[..., 0] * d[..., 1] +
-        inv_c.unsqueeze(0) * d[..., 1]**2
+
+    pixel_count = H * W
+    blended_color = torch.zeros(pixel_count, 3, device=device)
+    directml_accumulation = device.type == 'privateuseone'
+    running_transmittance = (
+        torch.zeros(pixel_count, device=device)
+        if directml_accumulation
+        else torch.ones(pixel_count, device=device)
     )
-    
-    alpha = opacities.unsqueeze(0) * torch.exp(power)
-    alpha = torch.clamp(alpha, min=0.0, max=0.99)
-    
-    transmittance = torch.cumprod(1.0 - alpha, dim=1)
-    T = torch.cat([torch.ones(H * W, 1, device=device), transmittance[:, :-1]], dim=1)
-    
-    weights = alpha * T
-    blended_color = torch.matmul(weights, colors)
-    
+    chunk_size = max(1, int(point_chunk_size))
+
+    def composite_chunk(running_t, chunk_xys, chunk_a, chunk_b, chunk_c, chunk_opacity, chunk_colors):
+        d = grid.unsqueeze(1) - chunk_xys.unsqueeze(0)
+        debug_sync('pixel distances', d)
+        power = -0.5 * (
+            chunk_a.unsqueeze(0) * d[..., 0]**2
+            + 2.0 * chunk_b.unsqueeze(0) * d[..., 0] * d[..., 1]
+            + chunk_c.unsqueeze(0) * d[..., 1]**2
+        )
+        debug_sync('gaussian power', power)
+        exponent = torch.exp(power)
+        debug_sync('gaussian exponential', exponent)
+        opacity_grid = chunk_opacity.unsqueeze(0).expand_as(exponent).contiguous()
+        debug_sync('opacity grid', opacity_grid)
+        unbounded_alpha = opacity_grid * exponent
+        debug_sync('unbounded alpha', unbounded_alpha)
+        # The Gaussian exponent is non-positive and opacity is sigmoid-bounded,
+        # so this product is already in [0, 1]. Scaling keeps it strictly below
+        # one and avoids a broken DirectML clamp kernel on computed tensors.
+        alpha = unbounded_alpha * 0.99
+        debug_sync('gaussian alpha', alpha)
+        if directml_accumulation:
+            # torch-directml's clamp/cumprod path is not reliable for this
+            # graph. Weighted Gaussian accumulation is fully differentiable,
+            # GPU-native, and stable across DirectX 12 vendors.
+            contribution = torch.matmul(alpha, chunk_colors)
+            return contribution, running_t + alpha.sum(dim=1)
+
+        one_minus_alpha = 1.0 - alpha
+        # DirectML's cumprod falls back through an incompatible CPU/out path.
+        # log/cumsum/exp is mathematically equivalent and stays differentiable
+        # on CUDA, DirectML, XPU, MPS, and CPU.
+        local_transmittance = torch.exp(
+            torch.cumsum(torch.log1p(-alpha), dim=1)
+        )
+        local_t = local_transmittance / one_minus_alpha
+        weights = alpha * local_t * running_t.unsqueeze(1)
+        contribution = torch.matmul(weights, chunk_colors)
+        return contribution, running_t * local_transmittance[:, -1]
+
+    for start in range(0, xys.shape[0], chunk_size):
+        end = min(start + chunk_size, xys.shape[0])
+        chunk_args = (
+            running_transmittance,
+            xys[start:end],
+            inv_a[start:end],
+            inv_b[start:end],
+            inv_c[start:end],
+            opacities[start:end],
+            colors[start:end],
+        )
+        if directml_accumulation:
+            contribution, running_transmittance = composite_chunk(*chunk_args)
+        else:
+            contribution, running_transmittance = checkpoint(
+                composite_chunk,
+                *chunk_args,
+                use_reentrant=False,
+            )
+        blended_color = blended_color + contribution
+
     bg_color = torch.ones(3, device=device)
-    final_transmittance = transmittance[:, -1:]
-    blended_color = blended_color + final_transmittance * bg_color.unsqueeze(0)
+    if directml_accumulation:
+        accumulated_weight = running_transmittance.unsqueeze(1)
+        normalized_color = blended_color / (accumulated_weight + 1e-6)
+        coverage = 1.0 - torch.exp(-accumulated_weight)
+        foreground = normalized_color * coverage
+        background = bg_color.unsqueeze(0) * (1.0 - coverage)
+        # Avoid DirectML AddBackward by concatenating an extra term axis and
+        # reducing it through a supported matrix multiplication.
+        terms = torch.stack([foreground, background], dim=-1)
+        blended_color = torch.matmul(
+            terms,
+            torch.ones(2, 1, device=device),
+        ).squeeze(-1)
+    else:
+        blended_color = blended_color + running_transmittance.unsqueeze(1) * bg_color.unsqueeze(0)
     
-    return blended_color.reshape(H, W, 3)
+    return blended_color if directml_accumulation else blended_color.reshape(H, W, 3)
 
 
 def train(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"[SplatStudio] Using device: {device}")
-    if device.type == 'cuda':
-        print(f"[SplatStudio] GPU: {torch.cuda.get_device_name(0)}")
-        print(f"[SplatStudio] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    if args.cpu_threads > 0:
+        torch.set_num_threads(args.cpu_threads)
+    if os.environ.get('SPLATSTUDIO_DEBUG_TRAINER') == '1':
+        torch.autograd.set_detect_anomaly(True)
+    device, backend = select_device(args.device)
+    device_name, device_memory = describe_device(device, backend)
+    print(f"[SplatStudio] Using backend: {backend} ({device})")
+    print(f"[SplatStudio] Device: {device_name}")
+    if device_memory is not None:
+        print(f"[SplatStudio] Device memory: {device_memory:.1f} GB")
+
+    native_backend_ready = backend == 'cuda' and has_gsplat and gsplat_cuda_available()
+    use_pytorch_fallback = not native_backend_ready
+    if use_pytorch_fallback:
+        print("[SplatStudio] Native gsplat CUDA is unavailable for this backend. Using the bounded PyTorch trainer.")
 
     model = find_colmap_model(args.input)
     if model is None:
@@ -488,23 +739,29 @@ def train(args):
     pts = np.array([p['xyz'] for p in points3d], dtype=np.float32)
     colors = np.array([p['rgb'] for p in points3d], dtype=np.float32) / 255.0
     
+    if use_pytorch_fallback and len(pts) > args.max_fallback_points:
+        keep_indices = np.linspace(0, len(pts) - 1, args.max_fallback_points, dtype=np.int64)
+        pts = pts[keep_indices]
+        colors = colors[keep_indices]
+        print(
+            f"[SplatStudio] Reduced the fallback training set from {len(points3d)} "
+            f"to {len(pts)} Gaussians to bound memory use."
+        )
+
     n_points = len(pts)
     print(f"[SplatStudio] Initializing {n_points} Gaussians...")
-    
-    # Trainable parameters
-    means = torch.tensor(pts, device=device, requires_grad=True)
-    
+
     # Initialize scales based on nearest neighbor distances (memory-efficient)
-    print(f"[SplatStudio] Computing initial scales (memory-efficient)...")
+    # This runs on CPU to avoid backend-specific cdist gaps and GPU memory spikes.
+    print("[SplatStudio] Computing initial scales on CPU...")
+    means_cpu = torch.from_numpy(pts)
     with torch.no_grad():
         if n_points > 20000:
-            # For large point clouds, sample to estimate average spacing
             sample_size = min(5000, n_points)
-            indices = torch.randperm(n_points, device=device)[:sample_size]
-            sample_pts = means.detach()[indices]
-            
-            # Compute distances in batches
-            batch_size = 512
+            generator = torch.Generator().manual_seed(0)
+            indices = torch.randperm(n_points, generator=generator)[:sample_size]
+            sample_pts = means_cpu[indices]
+            batch_size = 256
             nn_dists_list = []
             for i in range(0, sample_size, batch_size):
                 batch = sample_pts[i:i+batch_size]
@@ -513,18 +770,23 @@ def train(args):
                 nn_dists_list.append(dists.min(dim=1).values)
             nn_dists_sample = torch.cat(nn_dists_list)
             avg_dist = nn_dists_sample.mean().item()
-            nn_dists = torch.full((n_points,), avg_dist, device=device)
+            nn_dists = torch.full((n_points,), avg_dist)
         else:
-            # Small enough for full distance matrix
-            batch_size = 2048
-            nn_dists = torch.full((n_points,), 1e10, device=device)
+            batch_size = 256
+            nn_dists = torch.full((n_points,), 1e10)
             for i in range(0, n_points, batch_size):
                 end = min(i + batch_size, n_points)
-                dists = torch.cdist(means.detach()[i:end].unsqueeze(0), means.detach().unsqueeze(0)).squeeze(0)
-                dists[:, i:end][torch.arange(end-i, device=device), torch.arange(end-i, device=device)] = 1e10
+                dists = torch.cdist(means_cpu[i:end].unsqueeze(0), means_cpu.unsqueeze(0)).squeeze(0)
+                local = torch.arange(end - i)
+                dists[local, local + i] = 1e10
                 nn_dists[i:end] = dists.min(dim=1).values
-    
-    scales = torch.log(nn_dists.unsqueeze(-1).repeat(1, 3) * 0.5).requires_grad_(True)
+
+    finite_distances = nn_dists[torch.isfinite(nn_dists) & (nn_dists < 1e9)]
+    fallback_distance = finite_distances.median() if finite_distances.numel() else torch.tensor(0.01)
+    nn_dists = torch.where(nn_dists < 1e9, nn_dists, fallback_distance).clamp(min=1e-6)
+
+    means = torch.tensor(pts, device=device, requires_grad=True)
+    scales = torch.log(nn_dists.unsqueeze(-1).repeat(1, 3) * 0.5).to(device).requires_grad_(True)
     quats = torch.zeros(n_points, 4, device=device)
     quats[:, 0] = 1.0
     quats = quats.requires_grad_(True)
@@ -536,11 +798,6 @@ def train(args):
     
     opacities = torch.full((n_points, 1), -2.0, device=device, requires_grad=True)
     
-    native_backend_ready = device.type == 'cuda' and gsplat_cuda_available() and has_gsplat
-    use_pytorch_fallback = not native_backend_ready
-    if use_pytorch_fallback:
-        print("[SplatStudio] Native gsplat is unavailable. Using high-performance pure PyTorch fallback for training.")
-
     # Optimizer
     optimizer = optim.Adam([
         {'params': [means], 'lr': args.lr_position},
@@ -553,7 +810,9 @@ def train(args):
     # Prepare training views
     train_views = []
     for img_info in colmap_images:
-        cam = cameras[img_info['camera_id']]
+        cam = cameras.get(img_info['camera_id'])
+        if cam is None or cam['model'] == 'EQUIRECTANGULAR':
+            continue
         
         # Find image file
         img_path = image_dir / img_info['name']
@@ -566,39 +825,38 @@ def train(args):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         # Resize if needed for VRAM savings
-        h, w = img.shape[:2]
-        scale_factor = args.resolution
+        original_h, original_w = img.shape[:2]
+        h, w = original_h, original_w
+        scale_factor = min(1.0, max(0.01, args.resolution))
         if scale_factor < 1.0:
-            new_w, new_h = int(w * scale_factor), int(h * scale_factor)
+            new_w = max(1, int(round(w * scale_factor)))
+            new_h = max(1, int(round(h * scale_factor)))
             img = cv2.resize(img, (new_w, new_h))
             h, w = new_h, new_w
-        
-        img_tensor = torch.tensor(img, dtype=torch.float32, device=device) / 255.0
+
+        scale_x = w / original_w
+        scale_y = h / original_h
+        # Keep all source views in host memory and transfer one view per step.
+        img_tensor = torch.from_numpy(img.astype(np.float32) / 255.0)
         
         # Camera matrices
         R = qvec_to_rotmat(img_info['qvec'])
         t = np.array(img_info['tvec'])
         
         # Get intrinsics
-        params = cam['params']
-        if cam['model'] in ['SIMPLE_PINHOLE', 'SIMPLE_RADIAL']:
-            fx = fy = params[0] * scale_factor
-            cx, cy = params[1] * scale_factor, params[2] * scale_factor
-        else:  # PINHOLE
-            fx, fy = params[0] * scale_factor, params[1] * scale_factor
-            cx, cy = params[2] * scale_factor, params[3] * scale_factor
+        fx, fy, cx, cy = camera_intrinsics(cam, scale_x, scale_y)
         
         K = torch.tensor([
             [fx, 0, cx],
             [0, fy, cy],
             [0, 0, 1]
-        ], dtype=torch.float32, device=device)
+        ], dtype=torch.float32)
         
         # World to camera transform
         w2c = np.eye(4)
         w2c[:3, :3] = R
         w2c[:3, 3] = t
-        viewmat = torch.tensor(w2c, dtype=torch.float32, device=device)
+        viewmat = torch.tensor(w2c, dtype=torch.float32)
         
         train_views.append({
             'image': img_tensor,
@@ -616,7 +874,10 @@ def train(args):
     # Training loop
     print(f"[SplatStudio] Starting training for {args.iterations} iterations...")
     loss = None
+    loss_display = None
     render_successes = 0
+    render_failures = 0
+    fatal_render_reason = None
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -625,9 +886,9 @@ def train(args):
         
         # Pick random view
         view = train_views[iteration % len(train_views)]
-        gt_image = view['image']
-        viewmat = view['viewmat']
-        K = view['K']
+        gt_image = view['image'].to(device)
+        viewmat = view['viewmat'].to(device)
+        K = view['K'].to(device)
         W, H = view['width'], view['height']
         
         # Normalize quaternions
@@ -635,7 +896,8 @@ def train(args):
         
         if use_pytorch_fallback:
             # Downsample for pure PyTorch speed
-            fallback_res = min(64, W, H)
+            backend_limit = args.fallback_resolution if backend != 'cpu' else min(32, args.fallback_resolution)
+            fallback_res = max(8, min(backend_limit, W, H))
             scale_w = fallback_res / W
             scale_h = fallback_res / H
             
@@ -666,11 +928,22 @@ def train(args):
                     K=K_fallback,
                     H=fallback_res,
                     W=fallback_res,
-                    device=device
+                    device=device,
+                    point_chunk_size=args.point_chunk_size,
                 )
-                gt_image_active = gt_image_fallback
+                gt_image_active = (
+                    gt_image_fallback.reshape(-1, 3).contiguous()
+                    if backend == 'directml'
+                    else gt_image_fallback
+                )
             except Exception as e:
-                print(f"\n[WARN] PyTorch fallback rasterization error: {e}")
+                print(f"\n[WARN] PyTorch fallback rasterization error: {type(e).__name__}: {e!r}")
+                if os.environ.get('SPLATSTUDIO_DEBUG_TRAINER') == '1':
+                    traceback.print_exc()
+                render_failures += 1
+                if render_failures >= 3:
+                    fatal_render_reason = f'PyTorch rasterization failed repeatedly on {backend}: {e}'
+                    break
                 continue
         else:
             try:
@@ -690,39 +963,58 @@ def train(args):
                 rendered = renders[0]  # [H, W, C]
                 gt_image_active = gt_image
             except Exception as e:
-                print(f"\n[WARN] Native gsplat rasterization failed: {e}. Switching to high-performance pure PyTorch fallback!")
-                use_pytorch_fallback = True
-                continue
+                fatal_render_reason = f'Native gsplat rasterization failed: {e}'
+                print(f"\n[WARN] {fatal_render_reason}")
+                break
                 
         render_successes += 1
         
-        # L1 + SSIM loss
-        Ll1 = torch.nn.functional.l1_loss(rendered, gt_image_active)
+        if backend == 'directml':
+            # Grouped conv2d used by SSIM is unreliable in the maintained
+            # torch-directml plugin. Its fused mean-reduction backward is also
+            # unstable, so use primitive abs/sum operations for the L1 loss.
+            residual = rendered - gt_image_active
+            residual_cpu = residual.detach().cpu()
+            directml_output_gradient = (
+                torch.sign(residual_cpu) * (1.0 / residual_cpu.numel())
+            ).to(device)
+            loss_display = float(torch.abs(residual_cpu).mean())
+            loss = rendered
+        else:
+            # L1 + SSIM loss on native PyTorch backends.
+            Ll1 = torch.nn.functional.l1_loss(rendered, gt_image_active)
+            rendered_bchw = rendered.unsqueeze(0).permute(0, 3, 1, 2)
+            gt_bchw = gt_image_active.unsqueeze(0).permute(0, 3, 1, 2)
+            Lstructure = 1.0 - ssim(rendered_bchw, gt_bchw)
+            loss = 0.8 * Ll1 + 0.2 * Lstructure
         
-        rendered_bchw = rendered.unsqueeze(0).permute(0, 3, 1, 2)
-        gt_bchw = gt_image_active.unsqueeze(0).permute(0, 3, 1, 2)
-        Lssim = 1.0 - ssim(rendered_bchw, gt_bchw)
-        
-        loss = 0.8 * Ll1 + 0.2 * Lssim
-        
-        loss.backward()
+        if backend == 'directml':
+            # Supplying dL/d(rendered) directly bypasses broken DirectML
+            # scalar reduction backward kernels while preserving exact L1
+            # gradients through the rasterizer.
+            rendered.backward(directml_output_gradient)
+        else:
+            loss.backward()
         optimizer.step()
+        if backend != 'directml':
+            loss_display = loss.item()
         
         # Progress reporting
         if iteration % 100 == 0:
-            print(f"\n[SplatStudio] Iter {iteration}/{args.iterations} | Loss: {loss.item():.5f} | Gaussians: {means.shape[0]}")
+            print(f"\n[SplatStudio] Iter {iteration}/{args.iterations} | Loss: {loss_display:.5f} | Gaussians: {means.shape[0]}")
             # Write progress to a JSON file for the Node.js server to read
             progress = {
                 'iteration': iteration,
                 'total': args.iterations,
-                'loss': loss.item(),
+                'loss': loss_display,
                 'num_gaussians': means.shape[0],
-                'progress_pct': (iteration / args.iterations) * 100
+                'progress_pct': (iteration / args.iterations) * 100,
+                'backend': backend,
             }
             write_progress(args.output, progress)
     
-    if loss is None or render_successes == 0:
-        reason = "gsplat rasterization failed for every training iteration."
+    if fatal_render_reason or loss is None or render_successes == 0:
+        reason = fatal_render_reason or "Gaussian rasterization failed for every training iteration."
         finish_with_draft(args, reason, means, torch.exp(scales), quats, opacities, sh_coeffs)
         return
 
@@ -734,10 +1026,11 @@ def train(args):
     progress = {
         'iteration': args.iterations,
         'total': args.iterations,
-        'loss': loss.item() if loss is not None else 0.0,
+        'loss': loss_display if loss_display is not None else 0.0,
         'num_gaussians': means.shape[0],
         'progress_pct': 100.0,
-        'complete': True
+        'complete': True,
+        'backend': backend,
     }
     write_progress(output_dir, progress)
     
@@ -748,8 +1041,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SplatStudio 3D Gaussian Splatting Trainer')
     parser.add_argument('--input', required=True, help='Path to COLMAP workspace directory')
     parser.add_argument('--output', required=True, help='Path to output directory')
-    parser.add_argument('--iterations', type=int, default=7000, help='Number of training iterations')
+    parser.add_argument('--iterations', type=int, default=1000, help='Number of training iterations')
     parser.add_argument('--resolution', type=float, default=0.5, help='Resolution scale factor (0.25, 0.5, 1.0)')
+    parser.add_argument('--device', default='auto', help='Compute backend: auto, cuda[:N], rocm[:N], xpu[:N], mps, directml[:N], or cpu')
+    parser.add_argument('--cpu-threads', type=int, default=0, help='CPU thread count (0 uses the PyTorch default)')
+    parser.add_argument('--fallback-resolution', type=int, default=64, help='Maximum width/height for the portable PyTorch renderer')
+    parser.add_argument('--max-fallback-points', type=int, default=10000, help='Maximum Gaussians trained by the portable renderer')
+    parser.add_argument('--point-chunk-size', type=int, default=512, help='Portable renderer point chunk size')
     parser.add_argument('--lr-position', type=float, default=0.00016, help='Learning rate for positions')
     parser.add_argument('--lr-scale', type=float, default=0.005, help='Learning rate for scales')
     parser.add_argument('--lr-rotation', type=float, default=0.001, help='Learning rate for rotations')

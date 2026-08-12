@@ -1,11 +1,12 @@
 import React from 'react';
-import { CheckCircle2, Clock, Layers, Play, Square } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Layers, Play, Square } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAppStore } from '../../store';
 
 export function BatchView() {
-  const { currentJobId, isProcessing, progress, outputKind, stopProcessing, setCurrentView } = useAppStore();
+  const { currentJobId, isProcessing, progress, outputKind, hasOutput, logs, stopProcessing, setCurrentView } = useAppStore();
   const hasJob = Boolean(currentJobId);
+  const hasFailed = hasJob && !isProcessing && !hasOutput && logs.some((log) => log.type === 'error');
 
   return (
     <div className="max-w-4xl mx-auto h-full flex flex-col">
@@ -31,18 +32,18 @@ export function BatchView() {
           )}>
             <div className={cn(
               "w-10 h-10 rounded-lg flex items-center justify-center shadow-inner",
-              isProcessing ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-green-500/10 text-green-400 border border-green-500/20"
+              isProcessing ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : hasFailed ? "bg-red-500/10 text-red-400 border border-red-500/20" : "bg-green-500/10 text-green-400 border border-green-500/20"
             )}>
-              {isProcessing ? <Clock className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
+              {isProcessing ? <Clock className="w-4 h-4" /> : hasFailed ? <AlertCircle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex justify-between text-xs mb-1 gap-3">
                 <span className="font-medium text-gray-200 truncate">{currentJobId}</span>
                 <span className={cn(
                   "font-mono text-[10px] tracking-wider uppercase shrink-0",
-                  isProcessing ? "text-blue-400" : outputKind === 'draft' ? "text-yellow-500" : "text-green-400"
+                  isProcessing ? "text-blue-400" : hasFailed ? "text-red-400" : outputKind === 'draft' ? "text-yellow-500" : "text-green-400"
                 )}>
-                  {isProcessing ? `${Math.round(progress)}%` : outputKind === 'draft' ? 'Draft' : 'Done'}
+                  {isProcessing ? `${Math.round(progress)}%` : hasFailed ? 'Failed' : outputKind === 'draft' ? 'Draft' : 'Done'}
                 </span>
               </div>
               <div className="w-full h-1.5 bg-black/50 rounded-full overflow-hidden">

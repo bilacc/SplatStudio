@@ -1,13 +1,13 @@
-import React, { Suspense, useState, useEffect, useRef } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Box as BoxMesh, Environment, Grid, TransformControls, Bounds } from '@react-three/drei';
+import React, { Suspense, useState, useEffect } from 'react';
+import { Canvas } from '@react-three/fiber';
+import { OrbitControls, Box as BoxMesh, Grid, TransformControls } from '@react-three/drei';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 import { useAppStore } from '../../store';
 import { Box as BoxIcon, AlertTriangle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as THREE from 'three';
 
-function MKKSplat({ url }: { url: string }) {
+function MKKSplat({ url, onError }: { url: string; onError: (message: string) => void }) {
   const [viewer, setViewer] = useState<GaussianSplats3D.DropInViewer | null>(null);
 
   useEffect(() => {
@@ -15,8 +15,8 @@ function MKKSplat({ url }: { url: string }) {
     
     const v = new GaussianSplats3D.DropInViewer({
       sharedMemoryForWorkers: false,
-      ignoreDevicePixelRatio: false,
-      gpuArchitecturePreference: 'high-performance'
+      gpuAcceleratedSort: false,
+      ignoreDevicePixelRatio: true,
     });
     
     let isMounted = true;
@@ -25,31 +25,24 @@ function MKKSplat({ url }: { url: string }) {
       showLoadingUI: false
     }).then(() => {
       if (isMounted) setViewer(v);
-    }).catch(console.error);
+    }).catch((error: unknown) => {
+      if (isMounted) onError(error instanceof Error ? error.message : 'The model could not be loaded.');
+    });
 
     return () => {
       isMounted = false;
       try {
          v.dispose();
-      } catch (e) {}
+      } catch {}
       setViewer(null);
     };
-  }, [url]);
-
-  useFrame(({ gl, camera }) => {
-    if (viewer && viewer.viewer) {
-      try {
-        viewer.viewer.update(gl, camera);
-      } catch(e) {}
-    }
-  });
+  }, [url, onError]);
 
   return viewer ? <primitive object={viewer} /> : null;
 }
 
 export function Viewer3DView() {
-  const { progress, logs } = useAppStore();
-  const [wireframe, setWireframe] = useState(false);
+  const { hasOutput } = useAppStore();
   const [lighting, setLighting] = useState(true);
   const [splatUrl, setSplatUrl] = useState<string | null>(null);
   const [modelType, setModelType] = useState<'none' | 'native' | 'custom'>('none');
@@ -60,10 +53,8 @@ export function Viewer3DView() {
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [target, setTarget] = useState<THREE.Group | null>(null);
 
-  const hasFinished = progress === 100 && !logs.some(l => l.message.includes('Pipeline Error') && l.timestamp > Date.now() - 30000);
-
   useEffect(() => {
-    if (hasFinished) {
+    if (hasOutput) {
       // Check if real splat exists
       fetch('/api/output.splat', { method: 'HEAD' })
         .then(r => {
@@ -81,7 +72,7 @@ export function Viewer3DView() {
           setModelType('none');
         });
     }
-  }, [hasFinished]);
+  }, [hasOutput]);
 
   const handleImportCustom = async () => {
     if (!window.splatStudio?.selectSplatFile) return;
@@ -132,7 +123,6 @@ export function Viewer3DView() {
               <strong className="text-blue-400 font-medium">FILE:</strong> {modelName}
             </span>
           )}
-          <span><strong className="text-blue-400 font-medium">FPS:</strong> 60.0</span>
         </div>
         <div className="bg-black/60 backdrop-blur-md px-1.5 py-1.5 rounded-lg border border-white/10 flex gap-1 items-center shadow-lg shadow-black/20">
           <button 
@@ -145,31 +135,16 @@ export function Viewer3DView() {
           </button>
           <div className="w-px h-3 bg-white/10 mx-1"></div>
           <button 
-            onClick={() => setWireframe(!wireframe)}
-            className={cn("px-2 py-0.5 rounded transition-colors text-[11px] font-medium hover:bg-white/10", wireframe ? "text-blue-400 bg-white/5" : "text-gray-400 hover:text-white")}
-            title="Wireframe Mode"
-          >
-            Wireframe
-          </button>
-          <div className="w-px h-3 bg-white/10 mx-1"></div>
-          <button 
             onClick={() => setLighting(!lighting)}
             className={cn("px-2 py-0.5 rounded transition-colors text-[11px] font-medium hover:bg-white/10", lighting ? "text-yellow-400 bg-white/5" : "text-gray-400 hover:text-white")}
             title="Toggle Lighting"
           >
             Lighting
           </button>
-          <div className="w-px h-3 bg-white/10 mx-1"></div>
-          <button 
-            className="px-2 py-0.5 rounded transition-colors text-[11px] font-medium text-purple-400 bg-white/5 hover:bg-white/10"
-            title="Bounding Box Crop"
-          >
-            Crop Box (AABB)
-          </button>
         </div>
       </div>
 
-      {!splatUrl && hasFinished && (
+      {!splatUrl && hasOutput && (
         <div className="absolute top-4 right-4 z-10 bg-yellow-500/10 backdrop-blur-md px-3 py-2 rounded-lg border border-yellow-500/20 text-[11px] flex items-center text-yellow-500 shadow-lg shadow-black/20 max-w-xs">
           <AlertTriangle className="w-4 h-4 mr-2 shrink-0" />
           No splat file is available for the latest reconstruction.
@@ -196,7 +171,6 @@ export function Viewer3DView() {
         <Canvas camera={{ position: [2, 2, 2], fov: 45 }}>
           {lighting && <ambientLight intensity={0.5} />}
           {lighting && <directionalLight position={[10, 10, 5]} intensity={1.5} />}
-          {lighting && <Environment preset="city" />}
           
           <Grid infiniteGrid fadeDistance={20} sectionColor="#666" cellColor="#222" />
 
@@ -205,7 +179,7 @@ export function Viewer3DView() {
               <>
                 {target && <TransformControls object={target} mode={transformMode} size={0.5} />}
                 <group ref={setTarget}>
-                  <MKKSplat url={splatUrl} />
+                  <MKKSplat url={splatUrl} onError={setImportError} />
                 </group>
               </>
             ) : (

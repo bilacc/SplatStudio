@@ -12,6 +12,11 @@ bin/ffmpeg.exe
 bin/colmap.exe
 bin/lib/
 bin/python/
+bin/win32-*/
+work/
+.npm-cache/
+__pycache__/
+*.py[cod]
 
 # Runtime data
 data/
