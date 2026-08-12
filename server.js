@@ -1,9 +1,11 @@
+import "dotenv/config";
 import express from "express";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
+import { buildRuntimeEnv, publicRuntimeInfo, resolveRuntime } from "./runtime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -114,25 +116,6 @@ function clampNumber(value, fallback, min, max) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
-}
-
-function getBinPaths(binDir) {
-  const libDir = path.join(binDir, "lib");
-  const pythonDir = path.join(binDir, "python");
-  const torchLibDir = path.join(pythonDir, "Lib", "site-packages", "torch", "lib");
-
-  return [binDir, libDir, pythonDir, torchLibDir].filter(pathExists);
-}
-
-function buildToolEnv(binDir) {
-  const pathPrefix = getBinPaths(binDir).join(path.delimiter);
-  return {
-    ...process.env,
-    BIN_DIR: binDir,
-    PATH: `${pathPrefix}${pathPrefix ? path.delimiter : ""}${process.env.PATH || ""}`,
-    PYTHONIOENCODING: "utf-8",
-    PYTHONUTF8: "1",
-  };
 }
 
 function createUploadMiddleware(uploadRoot) {
@@ -268,6 +251,68 @@ async function listen(app, host, preferredPort) {
   throw lastError;
 }
 
+function captureProcess(command, args, options = {}) {
+  return new Promise((resolve) => {
+    if (!command) {
+      resolve({ code: -1, stdout: "", stderr: "Executable not found." });
+      return;
+    }
+
+    const proc = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env || process.env,
+      shell: false,
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeout = options.timeoutMs
+      ? setTimeout(() => {
+          if (!proc.killed) proc.kill();
+        }, options.timeoutMs)
+      : null;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve(result);
+    };
+
+    proc.stdout.on("data", (data) => { stdout += data.toString(); });
+    proc.stderr.on("data", (data) => { stderr += data.toString(); });
+    proc.on("close", (code) => finish({ code: code ?? 0, stdout, stderr }));
+    proc.on("error", (error) => finish({ code: -1, stdout, stderr: `${stderr}${error.message}` }));
+  });
+}
+
+function fallbackHardwareInfo(runtime, error) {
+  return {
+    available: false,
+    platform: runtime.platform,
+    architecture: runtime.arch,
+    recommended_backend: "cpu",
+    dependencies: {
+      numpy: false,
+      torch: false,
+      cv2: false,
+      plyfile: false,
+      tqdm: false,
+      gsplat: false,
+    },
+    devices: [{
+      id: "cpu",
+      backend: "cpu",
+      type: "CPU",
+      name: `${runtime.arch} CPU`,
+      available: false,
+      details: "Python/PyTorch runtime unavailable",
+    }],
+    error,
+  };
+}
+
 export async function startServer(options = {}) {
   const app = express();
   const host = options.host || "127.0.0.1";
@@ -286,8 +331,47 @@ export async function startServer(options = {}) {
   [uploadRoot, dataRoot, jobsRoot, exportsRoot].forEach(ensureDir);
 
   const upload = createUploadMiddleware(uploadRoot);
+  const getRuntime = () => resolveRuntime({ binDir });
+  let hardwareCache = null;
+
+  const getHardwareInfo = async (force = false) => {
+    const runtime = getRuntime();
+    const cacheKey = `${runtime.python.path || "missing"}|${runtime.hardwareProbe || "missing"}`;
+    if (!force && hardwareCache && hardwareCache.key === cacheKey && Date.now() - hardwareCache.at < 10000) {
+      return hardwareCache.value;
+    }
+
+    if (!runtime.python.path) {
+      const value = fallbackHardwareInfo(runtime, "Python was not found. Configure PYTHON_PATH or add a bundled runtime.");
+      hardwareCache = { key: cacheKey, at: Date.now(), value };
+      return value;
+    }
+    if (!runtime.hardwareProbe) {
+      const value = fallbackHardwareInfo(runtime, "hardware_probe.py was not found in the bin directory.");
+      hardwareCache = { key: cacheKey, at: Date.now(), value };
+      return value;
+    }
+
+    const result = await captureProcess(runtime.python.path, [runtime.hardwareProbe], {
+      env: buildRuntimeEnv(runtime),
+      timeoutMs: 30000,
+    });
+
+    let value;
+    try {
+      value = JSON.parse(result.stdout.trim());
+      if (!value || !Array.isArray(value.devices)) throw new Error("Invalid hardware probe response.");
+    } catch (error) {
+      const detail = result.stderr.trim() || result.stdout.trim() || error.message;
+      value = fallbackHardwareInfo(runtime, `Hardware detection failed: ${detail}`);
+    }
+
+    hardwareCache = { key: cacheKey, at: Date.now(), value };
+    return value;
+  };
 
   const pipelineState = {
+    isStarting: false,
     isRunning: false,
     abortRequested: false,
     progress: 0,
@@ -296,6 +380,8 @@ export async function startServer(options = {}) {
     currentJobId: null,
     currentOutputDir: exportsRoot,
     outputKind: null,
+    hardwareBackend: null,
+    lastError: null,
   };
 
   const addLog = (message, type = "info") => {
@@ -310,7 +396,12 @@ export async function startServer(options = {}) {
       if (!proc.killed && proc.pid) {
         try {
           if (process.platform === "win32") {
-            spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { windowsHide: true });
+            const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
+              windowsHide: true,
+              stdio: "ignore",
+            });
+            killer.on("error", () => {});
+            killer.unref();
           } else {
             proc.kill("SIGTERM");
           }
@@ -324,10 +415,16 @@ export async function startServer(options = {}) {
   };
 
   const runProcess = (command, args, processOptions = {}) => new Promise((resolve) => {
+    if (!command) {
+      addLog(`[${processOptions.label || "Process"} failed] Executable was not found.`, "error");
+      resolve(-1);
+      return;
+    }
     const label = processOptions.label || path.basename(command).replace(/\.(exe|py)$/i, "");
+    const runtime = getRuntime();
     const proc = spawn(command, args, {
       cwd: processOptions.cwd || workspaceRoot,
-      env: buildToolEnv(binDir),
+      env: buildRuntimeEnv(runtime),
       shell: false,
       windowsHide: true,
     });
@@ -369,7 +466,20 @@ export async function startServer(options = {}) {
     }
   };
 
-  const getBin = (...segments) => path.join(binDir, ...segments);
+  const colmapHelpCache = new Map();
+  const getColmapGpuOption = async (runtime, command, modernOption, legacyOption) => {
+    if (!colmapHelpCache.has(command)) {
+      const result = await captureProcess(runtime.colmap.path, [command, "-h"], {
+        env: buildRuntimeEnv(runtime),
+        timeoutMs: 30000,
+      });
+      colmapHelpCache.set(command, `${result.stdout}\n${result.stderr}`);
+    }
+    const help = colmapHelpCache.get(command);
+    if (help.includes(modernOption)) return modernOption;
+    if (help.includes(legacyOption)) return legacyOption;
+    return legacyOption;
+  };
 
   app.use(express.json({ limit: "25mb" }));
 
@@ -385,69 +495,97 @@ export async function startServer(options = {}) {
     });
   });
 
-  app.get("/api/runtime-info", (_req, res) => {
+  app.get("/api/runtime-info", async (_req, res) => {
+    const runtime = getRuntime();
+    const hardware = await getHardwareInfo();
+    const info = publicRuntimeInfo(runtime);
+    const requiredPythonDependencies = ["numpy", "torch", "cv2", "plyfile", "tqdm"];
+    const missingPythonDependencies = requiredPythonDependencies.filter(
+      (name) => !hardware.dependencies?.[name],
+    );
     res.json({
+      ...info,
+      ready: info.ready && missingPythonDependencies.length === 0,
+      videoReady: info.tools.ffmpeg.available,
+      offlineReady: info.ready
+        && info.tools.ffmpeg.available
+        && ["ffmpeg", "colmap", "python", "trainer", "hardwareProbe"].every(
+          (name) => info.tools[name]?.source === "bundled",
+        )
+        && missingPythonDependencies.length === 0,
+      missingPythonDependencies,
       workspaceRoot,
-      binDir,
-      hasColmap: pathExists(getBin("colmap.exe")),
-      hasFfmpeg: pathExists(getBin("ffmpeg.exe")),
-      hasPython: pathExists(getBin("python", "python.exe")),
       currentJobId: pipelineState.currentJobId,
       outputKind: pipelineState.outputKind,
     });
   });
 
   app.get("/api/gpu-info", async (_req, res) => {
-    try {
-      const pythonExe = getBin("python", "python.exe");
-      if (!pathExists(pythonExe)) {
-        return res.json({ available: false, error: "Bundled Python was not found." });
-      }
-
-      const script = [
-        "import json, torch",
-        "available=torch.cuda.is_available()",
-        "g=torch.cuda.get_device_properties(0) if available else None",
-        "print(json.dumps({",
-        "  'available': available,",
-        "  'name': g.name if g else None,",
-        "  'vram_gb': round(g.total_memory/1073741824,1) if g else 0,",
-        "  'cuda_version': torch.version.cuda or 'N/A'",
-        "}))",
-      ].join(";");
-
-      const output = await new Promise((resolve) => {
-        const proc = spawn(pythonExe, ["-c", script], {
-          env: buildToolEnv(binDir),
-          shell: false,
-          windowsHide: true,
-        });
-        let stdout = "";
-        proc.stdout.on("data", (data) => {
-          stdout += data.toString();
-        });
-        proc.on("close", () => resolve(stdout.trim()));
-        proc.on("error", () => resolve("{}"));
-      });
-
-      res.json(JSON.parse(output || "{}"));
-    } catch (error) {
-      res.json({ available: false, error: error.message });
-    }
+    res.json(await getHardwareInfo());
   });
 
-  app.post("/api/pipeline/start", (req, res) => {
-    if (pipelineState.isRunning) {
+  app.post("/api/pipeline/start", async (req, res) => {
+    if (pipelineState.isStarting || pipelineState.isRunning) {
       return res.status(409).json({ error: "Pipeline already running" });
     }
+    pipelineState.isStarting = true;
 
+    const runtime = getRuntime();
+    const runtimeInfo = publicRuntimeInfo(runtime);
+    const missingTools = ["colmap", "python", "trainer"].filter(
+      (name) => !runtimeInfo.tools[name]?.available,
+    );
+    if (missingTools.length > 0) {
+      pipelineState.isStarting = false;
+      return res.status(503).json({
+        error: `Required runtime components are missing: ${missingTools.join(", ")}. Open Runtime Status for detected paths.`,
+        missingTools,
+      });
+    }
+
+    const hardware = await getHardwareInfo(true);
+    const requiredPythonDependencies = ["numpy", "torch", "cv2", "plyfile", "tqdm"];
+    const missingPythonDependencies = requiredPythonDependencies.filter(
+      (name) => !hardware.dependencies?.[name],
+    );
+    if (missingPythonDependencies.length > 0) {
+      pipelineState.isStarting = false;
+      return res.status(503).json({
+        error: `Python runtime is missing required packages: ${missingPythonDependencies.join(", ")}.`,
+        missingPythonDependencies,
+      });
+    }
+
+    const requestedBackend = typeof req.body.backend === "string"
+      ? req.body.backend.toLowerCase()
+      : "auto";
+    const availableDevices = (hardware.devices || []).filter((device) => device.available);
+    const selectedDevice = requestedBackend === "auto"
+      ? availableDevices.find((device) => device.backend === hardware.recommended_backend)
+        || availableDevices[0]
+      : availableDevices.find(
+          (device) => device.id.toLowerCase() === requestedBackend
+            || device.backend.toLowerCase() === requestedBackend,
+        );
+
+    if (!selectedDevice) {
+      pipelineState.isStarting = false;
+      return res.status(400).json({
+        error: `Compute backend "${requestedBackend}" is not available in the active Python runtime.`,
+        availableBackends: availableDevices.map((device) => device.id),
+      });
+    }
+
+    pipelineState.isStarting = false;
     pipelineState.isRunning = true;
     pipelineState.abortRequested = false;
     pipelineState.progress = 0;
     pipelineState.logs = [];
     pipelineState.outputKind = null;
+    pipelineState.hardwareBackend = selectedDevice.id;
+    pipelineState.lastError = null;
 
-    addLog("Starting local Gaussian Splat reconstruction pipeline...", "info");
+    addLog(`Starting local Gaussian Splat reconstruction pipeline on ${selectedDevice.name} (${selectedDevice.id})...`, "info");
 
     (async () => {
       try {
@@ -486,7 +624,7 @@ export async function startServer(options = {}) {
         }
 
         const extractFps = clampNumber(req.body.extractFps, 2, 0.1, 60);
-        const maxIterations = Math.round(clampNumber(req.body.maxIterations, 7000, 1, 100000));
+        const maxIterations = Math.round(clampNumber(req.body.maxIterations, 1000, 1, 100000));
         const resolution = clampNumber(req.body.resolution, 0.5, 0.05, 1);
 
         if (req.body.engine && req.body.engine !== "gsplat") {
@@ -494,10 +632,13 @@ export async function startServer(options = {}) {
         }
 
         if (videos.length === 1) {
+          if (!runtime.ffmpeg.path) {
+            throw new Error("FFmpeg is required for video input but was not found. Configure FFMPEG_PATH or use an image sequence.");
+          }
           pipelineState.progress = 5;
           addLog(`[FFmpeg] Extracting frames at ${extractFps} FPS from ${path.basename(videos[0])}...`, "info");
           const code = await runProcess(
-            getBin("ffmpeg.exe"),
+            runtime.ffmpeg.path,
             [
               "-y",
               "-i",
@@ -526,8 +667,15 @@ export async function startServer(options = {}) {
 
         addLog("[COLMAP] Starting feature extraction...", "info");
         const dbPath = path.join(targetDataDir, "database.db");
+        const useColmapGpu = selectedDevice.backend === "cuda";
+        const extractionGpuOption = await getColmapGpuOption(
+          runtime,
+          "feature_extractor",
+          "--FeatureExtraction.use_gpu",
+          "--SiftExtraction.use_gpu",
+        );
         let code = await runProcess(
-          getBin("colmap.exe"),
+          runtime.colmap.path,
           [
             "feature_extractor",
             "--database_path",
@@ -536,8 +684,8 @@ export async function startServer(options = {}) {
             imagesDir,
             "--ImageReader.single_camera",
             "1",
-            "--SiftExtraction.use_gpu",
-            "1",
+            extractionGpuOption,
+            useColmapGpu ? "1" : "0",
           ],
           { label: "COLMAP" },
         );
@@ -550,13 +698,20 @@ export async function startServer(options = {}) {
           "info",
         );
 
+        const matcherCommand = useSequentialMatching ? "sequential_matcher" : "exhaustive_matcher";
+        const matchingGpuOption = await getColmapGpuOption(
+          runtime,
+          matcherCommand,
+          "--FeatureMatching.use_gpu",
+          "--SiftMatching.use_gpu",
+        );
         const matcherArgs = useSequentialMatching
           ? [
               "sequential_matcher",
               "--database_path",
               dbPath,
-              "--SiftMatching.use_gpu",
-              "1",
+              matchingGpuOption,
+              useColmapGpu ? "1" : "0",
               "--SequentialMatching.overlap",
               "10",
             ]
@@ -564,17 +719,17 @@ export async function startServer(options = {}) {
               "exhaustive_matcher",
               "--database_path",
               dbPath,
-              "--SiftMatching.use_gpu",
-              "1",
+              matchingGpuOption,
+              useColmapGpu ? "1" : "0",
             ];
 
-        code = await runProcess(getBin("colmap.exe"), matcherArgs, { label: "COLMAP" });
+        code = await runProcess(runtime.colmap.path, matcherArgs, { label: "COLMAP" });
         requireCodeZero(code, "COLMAP matching failed.");
         pipelineState.progress = 35;
 
         addLog("[COLMAP] Running sparse reconstruction...", "info");
         code = await runProcess(
-          getBin("colmap.exe"),
+          runtime.colmap.path,
           [
             "mapper",
             "--database_path",
@@ -611,9 +766,9 @@ export async function startServer(options = {}) {
         }, 3000);
 
         code = await runProcess(
-          getBin("python", "python.exe"),
+          runtime.python.path,
           [
-            getBin("train_splat.py"),
+            runtime.trainer,
             "--input",
             targetDataDir,
             "--output",
@@ -622,6 +777,8 @@ export async function startServer(options = {}) {
             String(maxIterations),
             "--resolution",
             String(resolution),
+            "--device",
+            selectedDevice.id,
             "--allow-draft-output",
           ],
           { label: "GS Training" },
@@ -651,7 +808,7 @@ export async function startServer(options = {}) {
         pipelineState.progress = 100;
         addLog(
           pipelineState.outputKind === "draft"
-            ? "Pipeline completed with a COLMAP-initialized draft splat because the CUDA rasterizer was unavailable."
+            ? `Pipeline completed with a COLMAP-initialized draft splat because training was unavailable on ${selectedDevice.id}.`
             : "Pipeline completed successfully. Trained splat model exported.",
           pipelineState.outputKind === "draft" ? "warn" : "success",
         );
@@ -659,6 +816,7 @@ export async function startServer(options = {}) {
         if (error.message === "Pipeline aborted") {
           addLog("[Pipeline] Processing aborted.", "warn");
         } else {
+          pipelineState.lastError = error.message;
           addLog(`[Pipeline Error] ${error.message}`, "error");
         }
       } finally {
@@ -668,7 +826,7 @@ export async function startServer(options = {}) {
       }
     })();
 
-    return res.json({ success: true, mode: "native" });
+    return res.json({ success: true, mode: "native", backend: selectedDevice.id });
   });
 
   app.post("/api/pipeline/abort", (_req, res) => {
@@ -681,12 +839,20 @@ export async function startServer(options = {}) {
   });
 
   app.get("/api/pipeline/status", (_req, res) => {
+    const hasOutput = Boolean(latestExisting([
+      path.join(pipelineState.currentOutputDir || "", "output.splat"),
+      path.join(exportsRoot, "output.splat"),
+    ]));
     res.json({
+      isStarting: pipelineState.isStarting,
       isRunning: pipelineState.isRunning,
       progress: pipelineState.progress,
       logs: pipelineState.logs,
       currentJobId: pipelineState.currentJobId,
       outputKind: pipelineState.outputKind,
+      hardwareBackend: pipelineState.hardwareBackend,
+      lastError: pipelineState.lastError,
+      hasOutput,
     });
   });
 
@@ -803,9 +969,13 @@ export async function startServer(options = {}) {
     app.use(viteDevServer.middlewares);
   } else {
     const distPath = options.staticDir || path.join(__dirname, "dist");
+    const indexPath = path.join(distPath, "index.html");
+    if (!pathExists(indexPath)) {
+      throw new Error(`Built renderer not found at ${indexPath}. Run the frontend build before starting production mode.`);
+    }
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      res.sendFile(indexPath);
     });
   }
 

@@ -1,0 +1,6 @@
+# Install a PyTorch build appropriate for the target CPU/GPU first:
+# https://pytorch.org/get-started/locally/
+numpy>=1.26
+opencv-python-headless>=4.9
+plyfile>=1.0
+tqdm>=4.66

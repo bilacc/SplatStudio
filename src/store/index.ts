@@ -49,6 +49,7 @@ interface AppState {
   progress: number;
   currentJobId: string | null;
   outputKind: string | null;
+  hasOutput: boolean;
   startProcessing: () => Promise<void>;
   stopProcessing: () => Promise<void>;
   
@@ -82,7 +83,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   removeLocalInput: (index) => set((state) => ({ localInputs: state.localInputs.filter((_, i) => i !== index) })),
   clearFiles: () => set({ files: [], localInputs: [] }),
   
-  hardwareBackend: 'CUDA',
+  hardwareBackend: 'auto',
   setHardwareBackend: (hardwareBackend) => set({ hardwareBackend }),
   
   engine: 'gsplat',
@@ -91,7 +92,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   extractFps: 2,
   setExtractFps: (extractFps) => set({ extractFps }),
 
-  maxIterations: 7000,
+  maxIterations: 1000,
   setMaxIterations: (maxIterations) => set({ maxIterations: Math.max(1, Math.round(maxIterations || 1)) }),
 
   resolution: 0.5,
@@ -104,6 +105,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   progress: 0,
   currentJobId: null,
   outputKind: null,
+  hasOutput: false,
   logs: [
     { id: 'start', timestamp: Date.now(), message: 'SplatStudio initializing...', type: 'info' }
   ],
@@ -177,6 +179,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // We poll the backend to get current state and logs.
     try {
       const res = await fetch('/api/pipeline/status');
+      if (!res.ok) throw new Error(`Status request failed (${res.status}).`);
       const data = await res.json();
       
       const newLogs = data.logs.map((l: any, i: number) => ({ ...l, id: `${l.timestamp}-${i}` }));
@@ -190,7 +193,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         mergedLogs.push(...newLogs);
         
         // Auto-navigate to viewer on completion
-        if (state.isProcessing && data.progress >= 100 && !data.isRunning) {
+        if (state.isProcessing && data.hasOutput && !data.isRunning) {
           setTimeout(() => get().setCurrentView('viewer'), 1500);
         }
 
@@ -199,6 +202,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           progress: data.progress,
           currentJobId: data.currentJobId || null,
           outputKind: data.outputKind || null,
+          hasOutput: Boolean(data.hasOutput),
           logs: mergedLogs
         };
       });

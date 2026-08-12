@@ -16,14 +16,14 @@ export function DocsView() {
             <Book className="w-4 h-4 mr-2 text-blue-400" /> Getting Started
           </h3>
           <p className="mb-4 text-xs leading-relaxed text-gray-400 relative z-10">
-            SplatStudio works by extracting frames from your video sequence (or using individual images), computing structure from motion (SfM) via COLMAP to determine camera poses, and finally training a Gaussian splat model.
+            SplatStudio includes FFmpeg, COLMAP, Python, PyTorch, and the trainer. It works entirely offline: add a video or image sequence, reconstruct the camera poses, and train a Gaussian splat without installing anything else.
           </p>
           <ol className="list-decimal pl-4 space-y-2 text-xs text-gray-400 relative z-10">
-            <li>Go to the <strong className="text-gray-200 font-medium tracking-wide">Workspace</strong> tab and drop your footage.</li>
-            <li>Switch to the <strong className="text-gray-200 font-medium tracking-wide">Reconstruction</strong> tab and select your GPU backend.</li>
+            <li>Go to the <strong className="text-gray-200 font-medium tracking-wide">Workspace</strong> tab and add one video or at least two overlapping images.</li>
+            <li>Switch to <strong className="text-gray-200 font-medium tracking-wide">Reconstruction</strong>, refresh runtime status, and choose a verified backend.</li>
             <li>Click "Start Reconstruction". Wait for processing to complete.</li>
             <li>Use the <strong className="text-gray-200 font-medium tracking-wide">3D Viewer</strong> to inspect the result in real-time.</li>
-            <li>Export via the <strong className="text-gray-200 font-medium tracking-wide">Export</strong> tab (.PLY, .OBJ, .GLTF).</li>
+            <li>Export <code className="text-blue-400">output.splat</code> or <code className="text-blue-400">splat.ply</code> from the <strong className="text-gray-200 font-medium tracking-wide">Export</strong> tab.</li>
           </ol>
         </div>
 
@@ -33,10 +33,20 @@ export function DocsView() {
             <Command className="w-4 h-4 mr-2 text-emerald-400" /> Hardware Guidelines
           </h3>
           <ul className="list-disc pl-4 space-y-3 text-xs text-gray-400 relative z-10">
-            <li><span className="text-emerald-400 font-mono bg-emerald-500/10 px-1.5 py-0.5 rounded">CUDA (Nvidia)</span> Utilizes native PyTorch bounds. Fastest, most stable.</li>
-            <li><span className="text-blue-400 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">AMD (ROCm)</span> Requires HIP implementation wrappers. Compatible with RDNA2.</li>
-            <li><span className="text-yellow-500 font-mono bg-yellow-500/10 px-1.5 py-0.5 rounded">CPU Processing</span> Universal fallback. Intended strictly for debugging.</li>
+            <li><span className="text-yellow-500 font-mono bg-yellow-500/10 px-1.5 py-0.5 rounded">CPU</span> Included and selected by default on Windows x64 and ARM64. Large point sets are reduced to keep memory bounded.</li>
+            <li><span className="text-blue-400 font-mono bg-blue-500/10 px-1.5 py-0.5 rounded">GPU</span> A compatible native PyTorch accelerator is used only after the embedded hardware probe verifies it. Experimental DirectML is deliberately not auto-selected.</li>
+            <li><span className="text-emerald-400 font-mono bg-emerald-500/10 px-1.5 py-0.5 rounded">ARM64</span> The UI and FFmpeg are native; Windows x64 emulation runs the embedded COLMAP and PyTorch CPU workers.</li>
           </ul>
+          <p className="mt-4 text-[10px] text-gray-500">COLMAP feature extraction uses its CUDA path only for a verified NVIDIA CUDA backend; every other backend uses COLMAP CPU feature extraction and matching.</p>
+        </div>
+
+        <div className="bg-[#1A1D23] rounded-2xl p-6 border border-white/5">
+          <h3 className="text-white text-sm font-semibold flex items-center mb-4">
+            <Command className="w-4 h-4 mr-2 text-blue-400" /> Runtime Layout
+          </h3>
+          <p className="text-xs leading-relaxed text-gray-400">
+            Production builds contain the complete, pinned runtime under <code className="text-blue-400">bin/&lt;platform&gt;-&lt;arch&gt;</code>. Runtime Status verifies every component before reconstruction starts. Environment overrides remain available to developers, but normal users never need them.
+          </p>
         </div>
 
         <div className="bg-[#1A1D23] rounded-2xl p-6 border border-white/5 relative overflow-hidden group">

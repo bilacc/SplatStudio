@@ -9,6 +9,11 @@ const __dirname = path.dirname(__filename);
 
 let mainWindow;
 let localServer;
+let shutdownStarted = false;
+
+if (process.env.SPLATSTUDIO_DISABLE_GPU === '1') {
+  app.disableHardwareAcceleration();
+}
 
 function getBinDir() {
   return app.isPackaged
@@ -91,8 +96,17 @@ app.whenReady().then(async () => {
     },
   });
 
-  mainWindow.loadURL(localServer.url);
-  mainWindow.webContents.openDevTools();
+  await mainWindow.loadURL(localServer.url);
+  if (!app.isPackaged && process.env.SPLATSTUDIO_OPEN_DEVTOOLS === '1') {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
+}).catch((error) => {
+  console.error(error);
+  dialog.showErrorBox(
+    'SplatStudio could not start',
+    error instanceof Error ? error.message : String(error),
+  );
+  app.quit();
 });
 
 app.on('window-all-closed', () => {
@@ -101,9 +115,12 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', async () => {
-  if (localServer) {
-    await localServer.close();
-    localServer = null;
-  }
+app.on('before-quit', (event) => {
+  if (!localServer || shutdownStarted) return;
+
+  event.preventDefault();
+  shutdownStarted = true;
+  const serverToClose = localServer;
+  localServer = null;
+  serverToClose.close().finally(() => app.quit());
 });
